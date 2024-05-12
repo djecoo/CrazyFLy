@@ -30,7 +30,6 @@ import time
 from threading import Timer
 
 import cflib.crtp  # noqa
-import keyboard
 import numpy as np
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
