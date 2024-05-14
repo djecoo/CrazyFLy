@@ -176,20 +176,24 @@ if __name__ == '__main__':
         if le.front < 300:
             print('obstacle detected')
             le.land = True
+            le.landing_pos = [le.x, le.y, le.z, le.yaw]
 
         if le.land:
+            x, y, z, yaw = le.landing_pos
             for _ in range(20):
                 print('landing')
-                cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+                # cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+                cf.commander.send_position_setpoint(x, y, z, yaw)
                 time.sleep(0.1)
 
-            for y in range(10):
+            land_iteration = 30
+            for i in range(land_iteration):
                 print('landing')
-                cf.commander.send_hover_setpoint(0, 0, 0, (10 - y) / 20)
+                # cf.commander.send_hover_setpoint(0, 0, 0, (20 - y) / 40)
+                cf.commander.send_position_setpoint(x, y, (z - (z * i / land_iteration)), yaw)
                 time.sleep(0.1)
-
             cf.commander.send_stop_setpoint()
-            break
+            exit(0)
 
         if not le.lift_off:
             for y in range(10):
