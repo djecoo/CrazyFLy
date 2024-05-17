@@ -42,6 +42,11 @@ logging.basicConfig(level=logging.ERROR)
 SAFE_DISTANCE = 400 #sensor reading
 DEFAULT_HEIGHT = 0.3 #m
 DEFAULT_VELOCITY = 0.1 #m/s
+SAFE_RIGHT_WALL = 0.3 # meters
+SAFE_LEFT_WALL = 2.7 # meters
+INITIAL_X = 0.5
+INITIAL_Y = 2.5
+GOAL_X = 3.5
 
 class LoggingExample:
     """
@@ -59,7 +64,7 @@ class LoggingExample:
         self._cf.disconnected.add_callback(self._disconnected)
         self._cf.connection_failed.add_callback(self._connection_failed)
         self._cf.connection_lost.add_callback(self._connection_lost)
-
+        self.yaw_direction = True
         print('Connecting to %s' % link_uri)
 
         # Try to connect to the Crazyflie
@@ -82,6 +87,11 @@ class LoggingExample:
         self.left = 0
         self.right = 0
         self.iter = 0
+
+        self.default_direction = 'RIGHT'
+
+        self.initial_position_reached = False
+        self.x_target = GOAL_X
 
     def _connected(self, link_uri):
         """ This callback is called form the Crazyflie API when a Crazyflie
@@ -128,21 +138,53 @@ class LoggingExample:
         print('Error when logging %s: %s' % (logconf.name, msg))
 
     def _stab_log_data(self, timestamp, data, logconf):
-        """Callback from a the log API when data arrives"""
-        print(f'[{timestamp}][{logconf.name}]: ', end='')
-        for name, value in data.items():
-            print(f'{name}: {value:3.3f} ', end='')
-        print()
         self.x = data['stateEstimate.x']
         self.y = data['stateEstimate.y']
         self.z = data['stateEstimate.z']
         self.yaw = data['stabilizer.yaw']
-        self.front = data['range.front']
-        self.back = data['range.back']
-        self.left = data['range.left']
-        self.right = data['range.right']
-        self.initial_position_reached = False
-        self.x_target = 3.
+        print(self.y)
+
+        if np.abs(self.yaw ) <= 45:
+            self.front = data['range.front']
+            self.back = data['range.back']
+            self.left = data['range.left']
+            self.right = data['range.right']
+            #print('DEVANT')
+
+        elif self.yaw >45 and self.yaw<=135:
+            self.front = data['range.right']
+            self.back = data['range.left']
+            self.left = data['range.front']
+            self.right = data['range.back']
+            #print('GAUCHE')
+
+        elif self.yaw < -45 and self.yaw > - 135:
+            self.front = data['range.left']
+            self.back = data['range.right']
+            self.left = data['range.back']
+            self.right = data['range.front']
+            #print('DROITE')
+
+        else:
+            self.front = data['range.back']
+            self.back = data['range.front']
+            self.left = data['range.right']
+            self.right = data['range.left']
+            #print('RETOURNE')
+
+        if self.yaw>=0:
+            if self.yaw%90< 45:
+                self.default_direction = 'RIGHT'
+            else:
+                self.default_direction = 'LEFT'
+        else:
+            if (-self.yaw)%90 < 45: 
+                self.default_direction = 'LEFT'
+            else:
+                self.default_direction = 'RIGHT'
+
+
+        
         
 
     def _connection_failed(self, link_uri, msg):
@@ -170,28 +212,66 @@ class LoggingExample:
         """Simple obstacle avoidance routine."""
         if self.front < SAFE_DISTANCE:
             # If obstacle detected in front, move left or right based on left and right sensor readings
-            if self.left < self.right:
-                # Move left
-                return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+            if self.default_direction == 'LEFT':
+                if self.y > SAFE_LEFT_WALL:
+                    # Move right
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+                else:
+                    # Move left
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
             else:
-                # Move right
-                return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+                if self.y < SAFE_RIGHT_WALL:
+                    # Move right
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+                else:
+                    # Move right
+                    return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
         elif self.left < SAFE_DISTANCE:
+            if self.y < SAFE_RIGHT_WALL:
+                return (0, 0), (self.x,self.y)
+            else:
             # If obstacle detected on the left, move right
-            return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+                return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
         elif self.right < SAFE_DISTANCE:
+            if self.y > SAFE_LEFT_WALL:
+                return (0, 0), (self.x,self.y)
+            else:
             # If obstacle detected on the right, move left
-            return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+                return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
         elif self.back < SAFE_DISTANCE:
             # If obstacle detected at the back, move forward
             return (DEFAULT_VELOCITY, 0), (self.x + DEFAULT_VELOCITY, self.y)
         else:
             # No obstacles detected, maintain current velocity and position
             return (0, 0), (self.x,self.y)
+        
+    def clip_angle(self,angle):
+        angle = angle%(360)
+        if angle > 180:
+            angle -= 360
+        if angle < -180:
+            angle += 360
+        return angle
+
     def move_command(self):
         # Start by taking off and hovering at the initial position.
+        sensor_values = {
+            'front': self.front,
+            'right': self.right,
+            'back': self.back,
+            'left': self.left
+        }
+    
+        # Find the direction with the maximum sensor value
+        max_direction = max(sensor_values, key=sensor_values.get)
+        max_value = sensor_values[max_direction]
+
+        # Print the result
         
 
+        yaw_goal = self.yaw + 10
+        yaw_goal = self.clip_angle(yaw_goal)
+        
         if not self.initial_position_reached:
             
             if self.x >= self.x_target:
@@ -201,14 +281,15 @@ class LoggingExample:
                 return
             else:
                 # Check for obstacle proximity
+                
                 if self.is_obstacle_close():
                     velocity, position = self.obstacle_avoidance_routine()
-                    self._cf.commander.send_position_setpoint(position[0], position[1], DEFAULT_HEIGHT,0)
+                    self._cf.commander.send_position_setpoint(position[0], position[1], DEFAULT_HEIGHT,yaw_goal)
                     time.sleep(0.05)
-                else:
-                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT, 0)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                else: 
+                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT, yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
                     time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
-    
+        
 
 
 if __name__ == '__main__':
@@ -223,18 +304,22 @@ if __name__ == '__main__':
     cf.param.set_value('kalman.resetEstimation', '0')
     time.sleep(2)
 
+    cf.param.set_value('kalman.initialX', INITIAL_X)
+    cf.param.set_value('kalman.initialY', INITIAL_Y)
+    cf.param.set_value('kalman.initialZ', 0)
+
+    
     # The Crazyflie lib doesn't contain anything to keep the application alive,
     # so this is where your application should do something. In our case we
     # are just waiting until we are disconnected.
     try: 
         while le.is_connected:
             time.sleep(0.01)
-            if le.back < 300:
-                le.land  = True
+            
             if le.land:
                 for _ in range(20):
                     print('landing')
-                    cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+                    cf.commander.send_hover_setpoint(0, 0, 0, 0.3)
                     time.sleep(0.1)
 
                 for y in range(10):
@@ -253,14 +338,14 @@ if __name__ == '__main__':
                     time.sleep(0.1)
 
                 for _ in range(20):
-                    cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+                    cf.commander.send_hover_setpoint(0, 0, 3, 0.3)
                     time.sleep(0.1)
                 le.lift_off = True
                 print('lift off')
             else:
                 le.move_command()
                 le.iter +=1
-                print(le.iter)
+                
     except KeyboardInterrupt:
         cf.commander.send_stop_setpoint()
 
