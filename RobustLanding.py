@@ -89,6 +89,7 @@ class LoggingExample:
         self.down = 0
 
         # Data for FSM
+        self.search_direction = 0 # direction of search in radians
         self.found_pos = None # [x, y, z, yaw]
         self.centering_done = False
         self.centering_obervations = [] # [[x, y, down], ...]
@@ -221,7 +222,16 @@ class LoggingExample:
                 [LANDING_PAD_SIZE / 2, - LANDING_PAD_SIZE / 2],
                 [0, 0]
             ])
+
+            yaw = self.search_direction
+            rotation_matrix = np.array([
+                [np.cos(yaw), -np.sin(yaw)],
+                [np.sin(yaw), np.cos(yaw)]
+            ])
+
+            square_positions = np.dot(square_positions, rotation_matrix)
             self.square_positions = square_positions + np.array([x, y])
+
             self.fsm == FSM.CENTERING
         elif self.fsm == FSM.CENTERING:
             self.centering_obervations.append([self.x, self.y, self.down])
@@ -251,6 +261,7 @@ class LoggingExample:
 
     def search(self):
         cf.set_position_setpoint(self. x + DEFAULT_VELOCITY, self.z, 0, DEFAULT_HEIGHT)
+        self.search_direction = np.arctan2(0, DEFAULT_VELOCITY)
         time.sleep(0.1)
 
     def finding(self):
