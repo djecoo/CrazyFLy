@@ -41,19 +41,17 @@ uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
 # Only output errors from the logging framework
 logging.basicConfig(level=logging.ERROR)
 
-
 # Constants
-SAFE_DISTANCE = 400 #sensor reading
-DEFAULT_HEIGHT = 0.3 #m
-DEFAULT_VELOCITY = 0.1 #m/s
-SAFE_RIGHT_WALL = 0.3 # meters
-SAFE_LEFT_WALL = 2.7 # meters
+SAFE_DISTANCE = 400  #sensor reading
+DEFAULT_HEIGHT = 0.3  #m
+DEFAULT_VELOCITY = 0.1  #m/s
+SAFE_RIGHT_WALL = 0.3  # meters
+SAFE_LEFT_WALL = 2.7  # meters
 INITIAL_X = 0.5
 INITIAL_Y = 2.5
 GOAL_X = 3.5
 
-LANDING_PAD_SIZE = 0.3 # meters
-
+LANDING_PAD_SIZE = 0.28  # meters
 
 
 class FSM(Enum):
@@ -66,6 +64,7 @@ class FSM(Enum):
     CENTERING = 'centering'
     LANDING = 'landing'
     STOP = 'stop'
+    GOING_BACK = 'going_back'
 
 
 class LoggingExample:
@@ -88,28 +87,29 @@ class LoggingExample:
         self.up = 0
         self.down = 0
 
-        # Data for FSM
-        self.search_direction = 0 # direction of search in radians
-        self.found_pos = None # [x, y, z, yaw]
-        self.centering_done = False
-        self.centering_obervations = [] # [[x, y, down], ...]
-        self.landing_pos = None # [x, y, z, yaw]
-        self.square_positions = None # [[x, y], ...]
+        self.fsm = FSM.INIT
 
-        self.t # Iteration time
+        # Data for FSM
+        self.found_pos = None  # [x, y, z, yaw]
+        self.square_positions = None  # [[x, y], ...]
+        self.prev_square_pos = None
+        self.centering_done = False
+        self.centering_observations = []  # [[x, y, down], ...]
+        self.landing_pos = None  # [x, y, z, yaw]
+
+        self.t = 0  # Iteration time
 
         self.actions: dict[FSM, callable] = {
             FSM.INIT: lambda x: time.sleep(1),
             FSM.TAKE_OFF: self.take_off,
-            FSM.ROTATE: self.rotate,
+            FSM.ROTATE: self.rotate,  # Not used in this code
             FSM.SEARCH: self.search,
             FSM.FOUND: self.finding,
             FSM.CENTERING: self.centering,
             FSM.LANDING: self.landing,
             FSM.STOP: self.stop,
+            FSM.GOING_BACK: self.going_back,
         }
-
-
         self._cf = Crazyflie(rw_cache='./cache')
 
         # Connect some callbacks from the Crazyflie API
@@ -119,12 +119,8 @@ class LoggingExample:
         self._cf.connection_lost.add_callback(self._connection_lost)
 
         print('Connecting to %s' % link_uri)
-
-        # Try to connect to the Crazyflie
-        self._cf.open_link(link_uri)
-
-        # Variable used to keep main loop occupied until disconnect
-        self.is_connected = True
+        self._cf.open_link(link_uri)  # Try to connect to the Crazyflie
+        self.is_connected = True  # Variable used to keep main loop occupied until disconnect
 
     def _connected(self, link_uri):
         """ This callback is called form the Crazyflie API when a Crazyflie
@@ -142,7 +138,7 @@ class LoggingExample:
         self._lg_stab.add_variable('range.left')
         self._lg_stab.add_variable('range.right')
         self._lg_stab.add_variable('range.up')
-        self._lg_stab.add_variable('range.down')
+        # self._lg_stab.add_variable('range.zrange')
         # The fetch-as argument can be set to FP16 to save space in the log packet
         # self._lg_stab.add_variable('pm.vbat', 'FP16')
 
@@ -170,11 +166,13 @@ class LoggingExample:
 
     def _stab_log_data(self, timestamp, data, logconf):
         """Callback from a the log API when data arrives"""
-        print(f'[{timestamp}][{logconf.name}]: ', end='')
-        for name, value in data.items():
-            print(f'{name}: {value:3.3f} ', end='')
-        print()
+        if self.t % 30 == -1:  # Print every 30th iteration
+            print(f'[{timestamp}][{logconf.name}]: ', end='')
+            for name, value in data.items():
+                print(f'{name}: {value:3.3f} ', end='')
+            print()
 
+        # Update sensor values
         self.x = data['stateEstimate.x']
         self.y = data['stateEstimate.y']
         self.z = data['stateEstimate.z']
@@ -184,7 +182,7 @@ class LoggingExample:
         self.left = data['range.left']
         self.right = data['range.right']
         self.up = data['range.up']
-        self.down = data['range.down']
+        self.down = 1000 * data['stateEstimate.z']
 
     def _connection_failed(self, link_uri, msg):
         """Callback when connection initial connection fails (i.e no Crazyflie
@@ -202,85 +200,86 @@ class LoggingExample:
         print('Disconnected from %s' % link_uri)
         self.is_connected = False
 
-
     def _fsm_update(self):
+        if self.up < 100 and self.fsm:
+            self.landing_pos = [self.x, self.y, self.z, self.yaw]
+            self.fsm = FSM.LANDING
+            return
+
         if self.fsm == FSM.INIT:
             self.fsm = FSM.TAKE_OFF
+
         elif self.fsm == FSM.TAKE_OFF:
             if self.z > 0.30:
                 self.fsm = FSM.SEARCH
+
         elif self.fsm == FSM.SEARCH:
-            if self.down < 100:
+            if self.down < 280:
                 self.fsm = FSM.FOUND
                 self.found_pos = [self.x, self.y, self.z, self.yaw]
+                self.prev_square_pos = self.found_pos[:2]
+
         elif self.fsm == FSM.FOUND:
-            x, y, _, _ = self.found_pos
-            square_positions = np.array([
-                [0, 0],
-                [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE / 2],
-                [0, LANDING_PAD_SIZE, y],
-                [LANDING_PAD_SIZE / 2, - LANDING_PAD_SIZE / 2],
-                [0, 0]
-            ])
+            self.square_positions = self.compute_square_positions()
+            self.fsm = FSM.CENTERING
 
-            yaw = self.search_direction
-            rotation_matrix = np.array([
-                [np.cos(yaw), -np.sin(yaw)],
-                [np.sin(yaw), np.cos(yaw)]
-            ])
-
-            square_positions = np.dot(square_positions, rotation_matrix)
-            self.square_positions = square_positions + np.array([x, y])
-
-            self.fsm == FSM.CENTERING
         elif self.fsm == FSM.CENTERING:
-            self.centering_obervations.append([self.x, self.y, self.down])
             if self.centering_done:
-                # Calculate landing position
-                observations = np.array(self.centering_obervations)
-                f_observations = observations[observations[:, 2] < 100]
-                land_pos = np.mean(f_observations[:, :2], axis=0)
-                self.landing_pos = [land_pos[0], land_pos[1], self.found_pos[2], self.found_pos[3]]
-                
-                # Reinit centering variables
-                self.centering_obervations = []
+                self.landing_pos = self.compute_landing_pos()
+                self.centering_observations = []  # Reset centering observations for next landing
                 self.centering_done = False
-
                 self.fsm = FSM.LANDING
+
         elif self.fsm == FSM.LANDING:
-            if self.down < 5:
+            if self.down < 50:
                 self.fsm = FSM.STOP
 
     def take_off(self):
-        cf.commander.send_hover_setpoint(0, 0, 0, self.z + 0.1)
+        cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
         time.sleep(0.1)
 
     def rotate(self):
-        cf.commander.send_hover_setpoint(0, 0, 0.2, DEFAULT_HEIGHT)
+        cf.commander.send_hover_setpoint(0, 0, DEFAULT_HEIGHT, 0.2)
         time.sleep(0.1)
 
     def search(self):
-        cf.set_position_setpoint(self. x + DEFAULT_VELOCITY, self.z, 0, DEFAULT_HEIGHT)
-        self.search_direction = np.arctan2(0, DEFAULT_VELOCITY)
+        cf.commander.send_position_setpoint(self.x + DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
+        time.sleep(0.1)
+
+    def going_back(self):
+        cf.commander.send_position_setpoint(self.x - DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
         time.sleep(0.1)
 
     def finding(self):
-        cf.set_position_setpoint(self.x, self.y, self.z, self.yaw)
+        cf.commander.send_position_setpoint(self.x, self.y, self.z, self.yaw)
         time.sleep(0.5)
 
     def centering(self):
         xf, yf, zf, yawf = self.found_pos
-        if len(self.centering_obervations):
-            x, y = self.square_positions[0]
-        else:
-            x, y = (xf, yf)
-        cf.set_position_setpoint(x, y, zf, yawf)
-        time.sleep(1)
-        self.square_positions = self.square_positions[1:]
+        x_prev, y_prev = self.prev_square_pos
+        iter_num = 25  # Number of iterations to reach the next centering position
+        for i in range(iter_num):
+            if len(self.square_positions) > 0:
+                x, y = self.square_positions[0]
+                delta_x = x - x_prev
+                delta_y = y - y_prev
+                new_x = x_prev + delta_x * (i / iter_num)
+                new_y = y_prev + delta_y * (i / iter_num)
+            else:
+                new_x, new_y = (xf, yf)
+                self.centering_done = True
+            self.centering_observations.append([self.x, self.y, self.down])
+            print(f'Centering: {self.x:.3f}, {self.y:.3f}, {int(self.down)}')
+            cf.commander.send_position_setpoint(new_x, new_y, zf, yawf)
+            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+        # print("Next centering position")
+        if len(self.square_positions) > 0:  # Go to the next square position
+            self.prev_square_pos = self.square_positions[0]
+            self.square_positions = self.square_positions[1:]
 
     def landing(self):
         x, y, _, yaw = self.landing_pos
-        cf.set_position_setpoint(x, y, self.z - DEFAULT_VELOCITY, yaw)
+        cf.commander.send_position_setpoint(x, y, self.z - 0.05, yaw)
         time.sleep(0.1)
 
     def stop(self):
@@ -289,6 +288,43 @@ class LoggingExample:
         time.sleep(0.1)
         exit(0)
 
+    def compute_landing_pos(self):
+        observations = np.array(self.centering_observations)
+        obs_delta = observations[2:, 2] - observations[:-2, 2]
+        rising_edge = np.where(obs_delta > 35)[0]  # Going up on the pad
+        falling_edge = np.where(obs_delta < -35)[0]  # Falling off the pad
+        mask = np.full(len(observations), np.nan)
+        mask[rising_edge] = True
+        mask[falling_edge] = False
+        current = True
+        for i in range(len(mask)):
+            if np.isnan(mask[i]):
+                mask[i] = current
+            else:
+                current = mask[i]
+        mask = mask.astype(bool)
+        print("Mask")
+        print(mask)
+        masked_obs = observations[mask]
+        land_pos = np.mean(masked_obs[:, :2], axis=0)
+        return [land_pos[0], land_pos[1], self.found_pos[2], self.found_pos[3]]
+
+    def compute_square_positions(self):
+        x, y, _, _ = self.found_pos
+        square_positions = np.array([
+            [0, 0],
+            [LANDING_PAD_SIZE / 2, - LANDING_PAD_SIZE / 2],
+            [LANDING_PAD_SIZE, 0],
+            [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE / 2],
+            [0, 0]
+        ])
+        yaw = 0  # TODO: Compute yaw by taking np.atan2(dy, dx) and check rotation matrix
+        rotation_matrix = np.array([
+            [np.cos(yaw), -np.sin(yaw)],
+            [np.sin(yaw), np.cos(yaw)]
+        ])
+        square_positions = np.dot(square_positions, rotation_matrix)
+        return square_positions + np.array([x, y])
 
 
 if __name__ == '__main__':
@@ -306,7 +342,7 @@ if __name__ == '__main__':
     # The Crazyflie lib doesn't contain anything to keep the application alive,
     # so this is where your application should do something. In our case we
     # are just waiting until we are disconnected.
-    
+
     while le.is_connected:
         # time.sleep(0.01)
         le.t += 1
@@ -314,10 +350,3 @@ if __name__ == '__main__':
         le.actions[le.fsm]()
 
         print(f'[{le.t}][{le.fsm}]')
-
-        
-
-
-
-
-
