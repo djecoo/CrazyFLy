@@ -37,7 +37,7 @@ from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.utils import uri_helper
 
-from spiral import archimedean_spiral
+from spiral import archimedean_spiral, normalize_spiral
 
 uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
 
@@ -109,7 +109,7 @@ class LoggingExample:
         self.centering_observations = []  # [[x, y, down], ...]
         self.landing_pos = None  # [x, y, z, yaw]
         self.landing_pad_reached = False
-        self.spiral_coord = archimedean_spiral(num_points=400)
+        self.spiral_coord = normalize_spiral(archimedean_spiral(num_points=500), fixed_norm=0.05)
 
         self.t = 0  # Iteration time
 
@@ -223,6 +223,10 @@ class LoggingExample:
         self.left = data['range.left']
         self.right = data['range.right']
         self.up = data['range.up']
+
+        global DEFAULT_HEIGHT
+        z_ref = 0.3 if self.z > 0.25 else 0.2
+        # DEFAULT_HEIGHT = 0.9 * DEFAULT_HEIGHT + 0.1 * z_ref
         # self.down = 1000 * data['stateEstimate.z']
 
     def _connection_failed(self, link_uri, msg):
@@ -420,16 +424,16 @@ class LoggingExample:
             [LANDING_PAD_SIZE, 0],
             [0, 0]
         ])
-        square_positions = np.array([
-            [0, 0],
-            [LANDING_PAD_SIZE, 0],
-            [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
-            [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE],
-            [-LANDING_PAD_SIZE/2, 0],
-            [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
-            [LANDING_PAD_SIZE/2, LANDING_PAD_SIZE/2],
-            [0, 0]
-        ])
+        # square_positions = np.array([
+        #     [0, 0],
+        #     [LANDING_PAD_SIZE, 0],
+        #     [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
+        #     [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE],
+        #     [-LANDING_PAD_SIZE/2, 0],
+        #     [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
+        #     [LANDING_PAD_SIZE/2, LANDING_PAD_SIZE/2],
+        #     [0, 0]
+        # ])
         yaw = np.arctan2(vy, vx)
         rotation_matrix = np.array([
             [np.cos(yaw), np.sin(yaw)],

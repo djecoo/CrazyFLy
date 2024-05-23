@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.interpolate import interp1d
 
 
 def archimedean_spiral(a=0, b=0.02, theta_max=10*np.pi, num_points=200):
@@ -16,11 +18,35 @@ def archimedean_spiral(a=0, b=0.02, theta_max=10*np.pi, num_points=200):
     return points
 
 
+def normalize_spiral(spiral_coords, fixed_norm=0.05):
+
+    # Step 1: Compute cumulative distance along the spiral
+    distances = np.zeros(spiral_coords.shape[0])
+    for i in range(1, len(spiral_coords)):
+        distances[i] = distances[i - 1] + np.linalg.norm(spiral_coords[i] - spiral_coords[i - 1])
+
+    # Step 2: Determine the fixed norm (distance between points)
+    total_length = distances[-1]
+
+    # Step 3: Generate new distances at fixed intervals
+    new_distances = np.linspace(0, total_length, int(total_length / fixed_norm))
+
+    # Step 4: Interpolate the x and y coordinates
+    interp_x = interp1d(distances, spiral_coords[:, 0], kind='linear')
+    interp_y = interp1d(distances, spiral_coords[:, 1], kind='linear')
+
+    # Get new coordinates
+    new_coords = np.vstack((interp_x(new_distances), interp_y(new_distances))).T
+    return new_coords
+
+
 def plot_spiral(a, b, theta_max=10 * np.pi, num_points=1000):
     p = archimedean_spiral(a, b, theta_max, num_points)
+    p = normalize_spiral(p)
+    print(len(p))
 
     plt.figure(figsize=(8, 8))
-    plt.plot(p[:, 0], p[:, 1], label=f'Spiral with a={a}, b={b}')
+    plt.scatter(p[:, 0], p[:, 1], label=f'Spiral with a={a}, b={b}', s=4)
     plt.xlabel('x')
     plt.ylabel('y')
     plt.title('Archimedean Spiral')
@@ -31,12 +57,7 @@ def plot_spiral(a, b, theta_max=10 * np.pi, num_points=1000):
 
 
 if __name__ == '__main__':
-    # Example usage
-    a = 0
-    b = 1
-    plot_spiral(a, b)
-
     # Try different values for a and b
     a = 0
-    b = 0.02
+    b = 0.035
     plot_spiral(a, b)
