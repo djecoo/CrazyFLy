@@ -54,6 +54,7 @@ INITIAL_X = 0.2
 INITIAL_Y = 0
 GOAL_X = 1
 
+Z_REF_COUNTER = 20
 LANDING_PAD_SIZE = 0.30  # meters
 
 
@@ -97,6 +98,9 @@ class LoggingExample:
         self.down = 0
         self.down_range = 0
         self.down_buffer = deque(maxlen=10)
+        self.z_ref = 0.2
+        self.z_ref_counter = Z_REF_COUNTER
+        self.az = 0
 
         self.down_buffer_data = []
 
@@ -109,7 +113,7 @@ class LoggingExample:
         self.centering_observations = []  # [[x, y, down], ...]
         self.landing_pos = None  # [x, y, z, yaw]
         self.landing_pad_reached = False
-        self.spiral_coord = normalize_spiral(archimedean_spiral(num_points=500), fixed_norm=0.05)
+        self.spiral_coord = normalize_spiral(archimedean_spiral(num_points=500), fixed_norm=0.02)
 
         self.t = 0  # Iteration time
 
@@ -139,6 +143,8 @@ class LoggingExample:
         self._cf.open_link(link_uri)  # Try to connect to the Crazyflie
         self.is_connected = True  # Variable used to keep main loop occupied until disconnect
 
+        self.logs = []
+
     def _connected(self, link_uri):
         """ This callback is called form the Crazyflie API when a Crazyflie
         has been connected and the TOCs have been downloaded."""
@@ -162,6 +168,7 @@ class LoggingExample:
         self._lg_stab2.add_variable('stateEstimate.vy', 'FP16')
         self._lg_stab2.add_variable('stateEstimate.vz', 'FP16')
         self._lg_stab2.add_variable('range.zrange', 'FP16')
+        self._lg_stab2.add_variable('stateEstimate.az', 'FP16')
         # The fetch-as argument can be set to FP16 to save space in the log packet
         # self._lg_stab.add_variable('pm.vbat', 'FP16')
 
@@ -203,6 +210,7 @@ class LoggingExample:
         self.vx = data['stateEstimate.vx']
         self.vy = data['stateEstimate.vy']
         self.down = data['range.zrange']
+        self.az = data['stateEstimate.az']
         self.down_buffer.append(self.down)
 
     def _stab_log_data(self, timestamp, data, logconf):
@@ -224,9 +232,18 @@ class LoggingExample:
         self.right = data['range.right']
         self.up = data['range.up']
 
-        global DEFAULT_HEIGHT
-        z_ref = 0.3 if self.z > 0.25 else 0.2
-        # DEFAULT_HEIGHT = 0.9 * DEFAULT_HEIGHT + 0.1 * z_ref
+        # global DEFAULT_HEIGHT
+        # if self.z_ref_counter > 0:
+        #     self.z_ref_counter -= 1
+        # else:
+        #     if self.down > 575:
+        #         if self.z_ref == 0.2:
+        #             self.z_ref_counter = Z_REF_COUNTER
+        #             self.z_ref = 0.3
+        #     else:
+        #         if self.z_ref == 0.3:
+        #             self.z_ref_counter = Z_REF_COUNTER
+        #             self.z_ref = 0.2
         # self.down = 1000 * data['stateEstimate.z']
 
     def _connection_failed(self, link_uri, msg):
@@ -256,16 +273,16 @@ class LoggingExample:
             self.fsm = FSM.TAKE_OFF
 
         elif self.fsm == FSM.TAKE_OFF:
-            if self.z > 0.30:
+            if self.z > 0.20:
                 self.fsm = FSM.GOING_BACK if self.landing_pad_reached else FSM.CROSS
 
         elif self.fsm == FSM.CROSS:
             if self.x + INITIAL_X > GOAL_X:
                 self.fsm = FSM.SEARCH
 
-        elif (self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING) or (
-                self.fsm == FSM.GOING_BACK and np.linalg.norm([self.x, self.y]) < 0.3 and self.down < 280):
-            if np.mean(list(self.down_buffer)[:-3]) < 275:
+        elif self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING or self.fsm == FSM.GOING_BACK:
+            # if np.mean(list(self.down_buffer)[:-3]) < 275:
+            if np.mean(list(self.down_buffer)[:-3]) < DEFAULT_HEIGHT - 25:
                 self.found_pos = [self.x, self.y, self.z, self.yaw]
                 self.found_vel = [self.vx, self.vy]
                 self.prev_square_pos = self.found_pos[:2]
@@ -273,6 +290,10 @@ class LoggingExample:
                 print(f'Found: {self.x:.3f}, {self.y:.3f}, {int(self.down)}')
                 print(f'Velocity: {self.vx:.3f}, {self.vy:.3f}')
                 print(f'Yaw: {np.arctan2(self.vy, self.vx):.3f}')
+
+            elif self.fsm == FSM.GOING_BACK:
+                if np.linalg.norm([self.x, self.y]) < 0.1:
+                    self.fsm = FSM.SPIRALING
 
         elif self.fsm == FSM.FOUND:
             self.square_positions = self.compute_square_positions()
@@ -292,31 +313,24 @@ class LoggingExample:
             self.fsm = FSM.STOP if self.landing_pad_reached else FSM.TAKE_OFF
             self.landing_pad_reached = True
 
-
-        elif self.fsm == FSM.GOING_BACK:
-            if np.linalg.norm([self.x, self.y]) < 0.1:
-                self.fsm = FSM.SPIRALING
-                print("Spiraling")
         else:
             print("Invalid state")
 
-
-
     def take_off(self):
-        cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
-        time.sleep(0.1)
+        cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+        time.sleep(0.05)
 
     def rotate(self):
         cf.commander.send_hover_setpoint(0, 0, 30, DEFAULT_HEIGHT)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     def cross(self):
         cf.commander.send_position_setpoint(self.x + DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     def search(self):
         cf.commander.send_position_setpoint(self.x + DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     def going_back(self):
         vector = -np.array([self.x, self.y])
@@ -325,7 +339,7 @@ class LoggingExample:
             cf.commander.send_position_setpoint(self.x + vector[0], self.y + vector[1], DEFAULT_HEIGHT, 0)
         else:
             cf.commander.send_position_setpoint(0, 0, DEFAULT_HEIGHT, 0)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     def spiraling(self):
         self.spiral_iter += 1
@@ -342,13 +356,13 @@ class LoggingExample:
             self.fsm = FSM.LANDING
             print("Spiral finished----------------------------")
         cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     def finding(self):
         x, y, _, yaw = self.found_pos
-        for i in range(20):
-            cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
-            time.sleep(0.1)
+        # for i in range(20):
+        cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+        time.sleep(0.05)
 
     def centering(self):
         self.center_iter += 1
@@ -365,7 +379,7 @@ class LoggingExample:
             new_x, new_y = (xf, yf)
         self.centering_observations.append([self.x, self.y, self.down])
         # print(f'Centering: {self.x:.3f}, {self.y:.3f}, {int(self.down)}, {int(self.down_range)}')
-        print(f'Down buffer diff: {[d - self.down for d in self.down_buffer]}')
+        # print(f'Down buffer diff: {[d - self.down for d in self.down_buffer]}')
         self.down_buffer_data.append([d for d in self.down_buffer])
         cf.commander.send_position_setpoint(new_x, new_y, DEFAULT_HEIGHT, yawf)
         time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
@@ -390,7 +404,7 @@ class LoggingExample:
     def stop(self):
         cf.commander.send_stop_setpoint()
         self._cf.close_link()
-        time.sleep(0.1)
+        time.sleep(0.05)
         exit(0)
 
     def compute_landing_pos(self):
@@ -446,18 +460,24 @@ class LoggingExample:
 
         state_repr: dict[FSM, str] = {
             FSM.INIT: f'',
-            FSM.TAKE_OFF: f'z: {self.z}',
+            FSM.TAKE_OFF: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
             FSM.ROTATE: f'',
-            FSM.CROSS: f'x: {self.x}, y: {self.y}',
-            FSM.SEARCH: f'x: {self.x}, y: {self.y}',
-            FSM.FOUND: f'x: down range: {self.down}',
-            FSM.CENTERING: f'down range: {self.down} - steps remaining: {len(self.square_positions)}',
+            FSM.CROSS: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
+            FSM.SEARCH: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
+            FSM.FOUND: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
+            FSM.CENTERING: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
             FSM.LANDING: f'z: {self.z}, down range: {self.down}',
             FSM.STOP: f'',
-            FSM.GOING_BACK: f'x: {self.x}, y: {self.y}, dist: {np.linalg.norm([self.x, self.y])}',
+            FSM.GOING_BACK: f'down range: {int(self.down)} - z: {self.z:.3f} - height: {DEFAULT_HEIGHT:.3f} - ref: {self.z_ref:.3f}, az: {self.az:.3f}',
             FSM.SPIRALING: f'x: {self.spiral_iter} {self.x}, y: {self.y}'
         }
         print(f'[{self.t}][{self.fsm}]: {state_repr[self.fsm]}')
+
+    def log_data(self):
+        self.logs.append(
+            [self.t, self.fsm, self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.front, self.back, self.left,
+             self.right, self.up, self.down, self.down_buffer, self.z_ref, self.az])
+
 
 
 if __name__ == '__main__':
@@ -475,6 +495,7 @@ if __name__ == '__main__':
     # so this is where your application should do something. In our case we
     # are just waiting until we are disconnected.
 
+    enable_log_data = True
     while le.is_connected:
         # time.sleep(0.01)
         t0 = time.perf_counter()
@@ -488,3 +509,19 @@ if __name__ == '__main__':
         if le.z < 0:
             print('Critical ERROR')
             le.fsm = FSM.STOP
+
+        if enable_log_data:
+            le.log_data()
+
+    # Save the data
+    if enable_log_data:
+        df = pd.DataFrame(
+            le.logs,
+            columns=['t', 'fsm', 'x', 'y', 'z', 'yaw', 'vx', 'vy',
+                     'front', 'back', 'left', 'right', 'up', 'down',
+                     'down_buffer', 'z_ref', 'az']
+        )
+        df.to_csv('logged_data.csv', index=False)
+
+
+
