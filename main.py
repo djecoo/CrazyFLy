@@ -65,7 +65,6 @@ min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X
 min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y
 
 
-
 class FSM(Enum):
     INIT = 'init'
     TAKE_OFF = 'take_off'
@@ -250,20 +249,6 @@ class LoggingExample:
 
         self.occupancy_map()
 
-        # global DEFAULT_HEIGHT
-        # if self.z_ref_counter > 0:
-        #     self.z_ref_counter -= 1
-        # else:
-        #     if self.down > 575:
-        #         if self.z_ref == 0.2:
-        #             self.z_ref_counter = Z_REF_COUNTER
-        #             self.z_ref = 0.3
-        #     else:
-        #         if self.z_ref == 0.3:
-        #             self.z_ref_counter = Z_REF_COUNTER
-        #             self.z_ref = 0.2
-        # self.down = 1000 * data['stateEstimate.z']
-
     def _connection_failed(self, link_uri, msg):
         """Callback when connection initial connection fails (i.e no Crazyflie
         at the specified address)"""
@@ -326,8 +311,6 @@ class LoggingExample:
                     self.fsm = FSM.SPIRALING
 
         elif self.fsm == FSM.FOUND:
-            # self.square_positions = self.compute_square_positions()
-            # print(f'Square positions: {self.square_positions}')
             if self.finding_iter == 5:
                 self.fsm = FSM.CENTERING
                 self.finding_iter = 0
@@ -394,7 +377,6 @@ class LoggingExample:
     def finding(self):
         xf, xf, _, yaw = self.found_pos
         x, y = self.pattern_position[0]
-        # for i in range(20):
         cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
         self.finding_iter += 1
         time.sleep(0.05)
@@ -410,31 +392,6 @@ class LoggingExample:
         self.pattern_iter += 1
         time.sleep(0.05)
 
-    # def centering2(self):
-    #     self.center_iter += 1
-    #     iter_num = 40  # Number of iterations to reach the next centering position
-    #     xf, yf, _, yawf = self.found_pos
-    #     x_prev, y_prev = self.prev_square_pos
-    #     x, y = self.pattern_position[0]
-    #     delta_x = x - x_prev
-    #     delta_y = y - y_prev
-    #     if len(self.pattern_position) > 0:
-    #         new_x = x_prev + delta_x * (self.center_iter / iter_num)
-    #         new_y = y_prev + delta_y * (self.center_iter / iter_num)
-    #     else:
-    #         new_x, new_y = (xf, yf)
-    #     self.centering_observations.append([self.x, self.y, self.down])
-    #     # print(f'Centering: {self.x:.3f}, {self.y:.3f}, {int(self.down)}, {int(self.down_range)}')
-    #     # print(f'Down buffer diff: {[d - self.down for d in self.down_buffer]}')
-    #     self.down_buffer_data.append([d for d in self.down_buffer])
-    #     cf.commander.send_position_setpoint(new_x, new_y, DEFAULT_HEIGHT, yawf)
-    #     time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
-    #     # print("Next centering position")
-    #     if len(self.pattern_position) > 0 and self.center_iter > iter_num:
-    #         # Go to the next square position
-    #         self.prev_square_pos = self.pattern_position[0]
-    #         self.pattern_position = self.pattern_position[1:]
-    #         self.center_iter = 0
 
     def landing(self):
         x, y, _, yaw = self.landing_pos
@@ -457,18 +414,6 @@ class LoggingExample:
         self._cf.close_link()
         time.sleep(0.05)
 
-
-    def compute_landing_pos2(self):
-        observations = np.array(self.centering_observations)
-        azs = observations[:, -1]
-        mask = np.full(len(observations), np.nan)
-        mask[azs > 0.08] = 1
-        mask[azs < 0.08] = -1
-
-        window_size = 10
-        for i in range(window_size, len(mask)):
-            pass
-
     def compute_landing_pos(self):
         observations = np.array(self.centering_observations)
         obs_delta = observations[1:, 2] - observations[:-1, 2]
@@ -489,34 +434,6 @@ class LoggingExample:
         masked_obs = observations[mask]
         land_pos = np.mean(masked_obs[:, :2], axis=0)
         return [land_pos[0], land_pos[1], self.found_pos[2], self.found_pos[3]]
-
-    def compute_square_positions(self):
-        x, y, _, _ = self.found_pos
-        vx, vy = self.found_vel
-        square_positions = np.array([
-            [0, 0],
-            [LANDING_PAD_SIZE / 2, - LANDING_PAD_SIZE / 2],
-            [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE / 2],
-            [LANDING_PAD_SIZE, 0],
-            [0, 0]
-        ])
-        # square_positions = np.array([
-        #     [0, 0],
-        #     [LANDING_PAD_SIZE, 0],
-        #     [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
-        #     [LANDING_PAD_SIZE / 2, LANDING_PAD_SIZE],
-        #     [-LANDING_PAD_SIZE/2, 0],
-        #     [LANDING_PAD_SIZE / 2, -LANDING_PAD_SIZE],
-        #     [LANDING_PAD_SIZE/2, LANDING_PAD_SIZE/2],
-        #     [0, 0]
-        # ])
-        yaw = np.arctan2(vy, vx)
-        rotation_matrix = np.array([
-            [np.cos(yaw), np.sin(yaw)],
-            [-np.sin(yaw), np.cos(yaw)]
-        ])
-        square_positions = np.dot(square_positions, rotation_matrix)
-        return square_positions + np.array([x, y])
 
     def print_state_info(self):
 
