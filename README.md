@@ -17,9 +17,15 @@ Install the required dependencies
 To run the main controller
 
 `python main.py` : no obstacle avoidance and no grid search (seb et enrique)
-
 `python main_merged.py` : everything together
 
-## View data logged with streamlit
+## Analyze logged data
+Run the streamlit app to visualize the data logged:
 `streamlit run visualize_app.py`
+
+Observe occupancy grid in **occ_map.png**
+
+
+
+
 
