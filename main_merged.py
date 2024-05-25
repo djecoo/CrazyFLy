@@ -45,24 +45,28 @@ uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
 # Only output errors from the logging framework
 logging.basicConfig(level=logging.ERROR)
 
-# Constants
-SAFE_DISTANCE = 400  #sensor reading
-DEFAULT_HEIGHT = 0.3  #m
-DEFAULT_VELOCITY = 0.1  #m/s
-SAFE_RIGHT_WALL = 0.3  # meters
-SAFE_LEFT_WALL = 2.7  # meters
+# Initial Position
 INITIAL_X = 0.3
 INITIAL_Y = 1.5
+LANDING_PAD_SIZE = 0.30
+
+# General Navigation
+DEFAULT_HEIGHT = 0.3  #m
+DEFAULT_VELOCITY = 0.1  #m/s
 GOAL_X = 1
 
-Z_REF_COUNTER = 20
-LANDING_PAD_SIZE = 0.30  # meters$
+# Obstacle avoidance params
+SAFE_DISTANCE = 400  #sensor reading
+SAFE_DISTANCE_LP = 200 # Sensor reading in lp zone
+SAFE_RIGHT_WALL = 0.3 - INITIAL_X
+SAFE_LEFT_WALL = 2.7 - INITIAL_Y
 
+# Occupancy grid parameters
 range_max = 2  # meters
 res_pos = 0.2  # meters
 conf = 0.1
-min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X
-min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y
+min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X  # x valid values
+min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y  # y valid values
 
 
 class FSM(Enum):
@@ -110,17 +114,14 @@ class LoggingExample:
         self.down_range = 0
         self.down_buffer = deque(maxlen=10)
         self.z_ref = 0.2
-        self.z_ref_counter = Z_REF_COUNTER
         self.az = 0
 
         self.down_buffer_data = []
-
         self.fsm = FSM.INIT
 
         # Data for FSM
         self.found_pos = None  # [x, y, z, yaw]
         self.pattern_position = np.array([])  # [[x, y], ...]
-        # self.prev_square_pos = None
         self.centering_observations = []  # [[x, y, down], ...]
         self.landing_pos = None  # [x, y, z, yaw]
         self.landing_pad_reached = False
@@ -131,18 +132,29 @@ class LoggingExample:
         self.occ_map = np.zeros((int(5 / res_pos), int(3 / res_pos)))
         self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.5), fixed_norm=0.01)
 
+        # Obstacle avoidance data
+        self.default_direction = 'RIGHT'
+        self.orientation = 'DEVANT'
+
+        # Search landing pad
+        self.direction = "LEFT"
+        self.pass_obstacle = False
+        self.x_goback = False
+        self.save_x_pos = None
+        self.save_y_pos = None
+
         self.actions: dict[FSM, callable] = {
-            FSM.INIT: lambda x: time.sleep(1),
+            FSM.INIT: lambda x: time.sleep(0.05),
             FSM.TAKE_OFF: self.take_off,
             FSM.ROTATE: self.rotate,  # Not used in this code
-            FSM.CROSS: self.cross,  # Not used in this code
-            FSM.SEARCH: self.search,
+            FSM.CROSS: self.move_command,  # Not used in this code
+            FSM.SEARCH: self.search_landing_pad,
             FSM.FOUND: self.finding,
             FSM.CENTERING: self.centering,
             FSM.LANDING: self.landing,
             FSM.STOP: self.stop,
             FSM.GOING_BACK: self.going_back,
-            FSM.SPIRALING: self.spiraling2,
+            FSM.SPIRALING: self.spiraling,
         }
 
         self._cf = Crazyflie(rw_cache='./cache')
@@ -215,11 +227,11 @@ class LoggingExample:
 
     def _stab_log_data2(self, timestamp, data, logconf):
         """Callback from a the log API when data arrives"""
-        if self.t % 1 == -1:
-            print(f'[{timestamp}][{logconf.name}]: ', end='')
-            for name, value in data.items():
-                print(f'{name}: {value:3.3f} ', end='')
-            print()
+        # if self.t % 1 == -1:
+        #     print(f'[{timestamp}][{logconf.name}]: ', end='')
+        #     for name, value in data.items():
+        #         print(f'{name}: {value:3.3f} ', end='')
+        #     print()
 
         self.vx = data['stateEstimate.vx']
         self.vy = data['stateEstimate.vy']
@@ -230,11 +242,11 @@ class LoggingExample:
 
     def _stab_log_data(self, timestamp, data, logconf):
         """Callback from a the log API when data arrives"""
-        if self.t % 1 == -1:  # Print every 30th iteration
-            print(f'[{timestamp}][{logconf.name}]: ', end='')
-            for name, value in data.items():
-                print(f'{name}: {value:3.3f} ', end='')
-            print()
+        # if self.t % 1 == -1:  # Print every 30th iteration
+        #     print(f'[{timestamp}][{logconf.name}]: ', end='')
+        #     for name, value in data.items():
+        #         print(f'{name}: {value:3.3f} ', end='')
+        #     print()
 
         # Update sensor values
         self.x = data['stateEstimate.x']
@@ -246,6 +258,58 @@ class LoggingExample:
         self.front = min(data['range.front'], 2000)
         self.right = min(data['range.right'], 2000)
         self.up = data['range.up']
+
+        if np.abs(self.yaw) <= 45:
+            self.front = data['range.front']
+            self.back = data['range.back']
+            self.left = data['range.left']
+            self.right = data['range.right']
+            self.orientation = 'DEVANT'
+
+        elif self.yaw >45 and self.yaw<=135:
+            self.front = data['range.right']
+            self.back = data['range.left']
+            self.left = data['range.front']
+            self.right = data['range.back']
+            self.orientation = 'GAUCHE'
+            #print('GAUCHE')
+
+        elif self.yaw < -45 and self.yaw > -135:
+            self.front = data['range.left']
+            self.back = data['range.right']
+            self.left = data['range.back']
+            self.right = data['range.front']
+            self.orientation = 'DROITE'
+            #print('DROITE')
+
+        elif 135 < self.yaw < 180 or -180 > self.yaw > -135:
+            self.front = data['range.back']
+            self.back = data['range.front']
+            self.left = data['range.right']
+            self.right = data['range.left']
+            self.orientation = 'RETOURNE'
+            #print('RETOURNE')
+
+        if self.orientation == 'DEVANT':
+            if self.yaw >= 0:
+                self.default_direction = 'RIGHT'
+            else:
+                self.default_direction = 'LEFT'
+        elif self.orientation == 'GAUCHE':
+            if self.yaw >= 90:
+                self.default_direction = 'RIGHT'
+            elif self.yaw < 90:
+                self.default_direction = 'LEFT'
+        elif self.orientation == 'RETOURNE':
+            if -135 >= self.yaw >= -180:
+                self.default_direction = 'RIGHT'
+            elif 135 <= self.yaw <= 180:
+                self.default_direction = 'LEFT'
+        elif self.orientation == 'DROITE':
+            if self.yaw <= -90:
+                self.default_direction = 'RIGHT'
+            else:
+                self.default_direction = 'LEFT'
 
         self.occupancy_map()
 
@@ -358,13 +422,6 @@ class LoggingExample:
         time.sleep(0.05)
 
     def spiraling(self):
-        self.spiral_iter += 1
-        max_vel = DEFAULT_VELOCITY * 2
-        vel = min((self.spiral_iter / 200) * max_vel, max_vel)
-        cf.commander.send_hover_setpoint(vel, 0, 50, DEFAULT_HEIGHT)
-        time.sleep(0.05)
-
-    def spiraling2(self):
         x, y = self.spiral_coord[self.spiral_iter]
         self.spiral_iter += 1
         if self.spiral_iter == len(self.spiral_coord):
@@ -435,6 +492,230 @@ class LoggingExample:
         land_pos = np.mean(masked_obs[:, :2], axis=0)
         return [land_pos[0], land_pos[1], self.found_pos[2], self.found_pos[3]]
 
+    def is_obstacle_close(self):
+        sensor_data = [self.back, self.front, self.left, self.right]
+        return any(sensor_data) and min(sensor_data) < SAFE_DISTANCE
+
+    def obstacle_avoidance_routine(self):
+        """Simple obstacle avoidance routine."""
+        if self.front < SAFE_DISTANCE:
+            # If obstacle detected in front, move left or right based on left and right sensor readings
+            if self.default_direction == 'RIGHT':
+                print("Hi")
+                print(self.y)
+                if self.y > SAFE_LEFT_WALL:
+                    # Move right
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+                else:
+                    # Move left
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+            else:
+                print("Hello")
+                print(self.y)
+                if self.y < SAFE_RIGHT_WALL:
+                    # Move right
+                    return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+                else:
+                    # Move right
+                    return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+        elif self.left < SAFE_DISTANCE:
+            if self.y < SAFE_RIGHT_WALL:
+                return (0, 0), (self.x, self.y)
+            else:
+                # If obstacle detected on the left, move right
+                return (0, -DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
+        elif self.right < SAFE_DISTANCE:
+            if self.y > SAFE_LEFT_WALL:
+                return (0, 0), (self.x, self.y)
+            else:
+                # If obstacle detected on the right, move left
+                return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
+        elif self.back < SAFE_DISTANCE:
+            # If obstacle detected at the back, move forward
+            return (DEFAULT_VELOCITY, 0), (self.x + DEFAULT_VELOCITY, self.y)
+        else:
+            # No obstacles detected, maintain current velocity and position
+            return (0, 0), (self.x, self.y)
+
+    def clip_angle(self, angle):
+        angle = angle % (360)
+        if angle > 180:
+            angle -= 360
+        if angle < -180:
+            angle += 360
+        return angle
+
+    def move_command(self):
+        # Start by taking off and hovering at the initial position.
+        sensor_values = {
+            'front': self.front,
+            'right': self.right,
+            'back': self.back,
+            'left': self.left
+        }
+
+        # Find the direction with the maximum sensor value
+        max_direction = max(sensor_values, key=sensor_values.get)
+        max_value = sensor_values[max_direction]
+
+        # Print the result
+        yaw_goal = self.yaw + 10
+        yaw_goal = self.clip_angle(yaw_goal)
+
+        if self.is_obstacle_close():
+            velocity, position = self.obstacle_avoidance_routine()
+            self._cf.commander.send_position_setpoint(position[0], position[1], DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+        else:
+            self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT, yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+
+    def is_obstacle_close_lp(self):
+        sensor_data = [self.back, self.front, self.left, self.right]
+        if self.direction == "LEFT":
+            return sensor_data[2] < SAFE_DISTANCE_LP
+        else:
+            return sensor_data[3] < SAFE_DISTANCE_LP
+
+    def obstacle_avoidance_left(self):
+        self.save_x_pos = self.x
+        self.save_y_pos = self.y
+        while True:
+            if not self.pass_obstacle:
+                if self.left < SAFE_DISTANCE_LP or (self.x - self.save_x_pos) < 0.1:
+                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                else:
+                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                    self.pass_obstacle = True
+            else:
+                if not self.x_goback:
+                    if self.back < SAFE_DISTANCE_LP or (self.y - self.save_y_pos) < 0.1:
+                        if self.y < SAFE_LEFT_WALL:
+                            self._cf.commander.send_position_setpoint(self.x, self.y + 0.1, DEFAULT_HEIGHT,
+                                                                      self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                        else:
+                            self.direction = "RIGHT"
+                            self._cf.commander.send_position_setpoint(self.x, self.y, DEFAULT_HEIGHT, self.y)
+                            self.pass_obstacle = False
+                            self.x_goback = False
+                            break
+                    else:
+                        self._cf.commander.send_position_setpoint(self.x, self.y + 0.1, DEFAULT_HEIGHT,
+                                                                  self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                        time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                        self.x_goback = True
+                else:
+                    self._cf.commander.send_position_setpoint(self.x - (self.x - self.save_x_pos), self.y + 0.1,
+                                                              DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.5)  # Adjust sleep time based on responsiveness needs
+                    self.pass_obstacle = False
+                    self.x_goback = False
+                    break
+
+    def obstacle_avoidance_right(self):
+        self.save_x_pos = self.x
+        self.save_y_pos = self.y
+        while True:
+            if not self.pass_obstacle:
+                if self.right < SAFE_DISTANCE_LP or (self.x - self.save_x_pos) < 0.1:
+                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                else:
+                    self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                    self.pass_obstacle = True
+            else:
+                if not self.x_goback:
+                    if self.back < SAFE_DISTANCE_LP or (self.save_y_pos - self.y) < 0.1:
+                        if self.y < SAFE_LEFT_WALL:
+                            self._cf.commander.send_position_setpoint(self.x, self.y - 0.1, DEFAULT_HEIGHT,
+                                                                      self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                        else:
+                            self.direction = "LEFT"
+                            self._cf.commander.send_position_setpoint(self.x, self.y, DEFAULT_HEIGHT, self.y)
+                            self.pass_obstacle = False
+                            self.x_goback = False
+                            break
+                    else:
+                        self._cf.commander.send_position_setpoint(self.x, self.y - 0.1, DEFAULT_HEIGHT,
+                                                                  self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                        time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                        self.x_goback = True
+                else:
+                    self._cf.commander.send_position_setpoint(self.x - (self.x - self.save_x_pos), self.y - 0.1,
+                                                              DEFAULT_HEIGHT,
+                                                              self.y)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.5)  # Adjust sleep time based on responsiveness needs
+                    self.pass_obstacle = False
+                    self.x_goback = False
+                    break
+
+    def obstacle_avoidance_lp(self):
+        """Simple obstacle avoidance routine."""
+        if self.left < SAFE_DISTANCE_LP:
+            if self.y > SAFE_LEFT_WALL:
+                return (0, 0), (self.x, self.y)
+            else:
+                # If obstacle detected on the left, move right
+                self.obstacle_avoidance_left()
+        elif self.right < SAFE_DISTANCE_LP:
+            if self.y < SAFE_RIGHT_WALL:
+                return (0, 0), (self.x, self.y)
+            else:
+                # If obstacle detected on the left, move right
+                self.obstacle_avoidance_right()
+
+    def search_landing_pad(self):
+        # Start by taking off and hovering at the initial position.
+        sensor_values = {
+            'front': self.front,
+            'right': self.right,
+            'back': self.back,
+            'left': self.left
+        }
+
+        # Find the direction with the maximum sensor value
+        max_direction = max(sensor_values, key=sensor_values.get)
+        max_value = sensor_values[max_direction]
+
+        # Print the result
+        yaw_goal = self.yaw + 10
+        yaw_goal = self.clip_angle(yaw_goal)
+
+        # Check for obstacle proximity
+        if self.is_obstacle_close_lp():
+            self.obstacle_avoidance_lp()
+            time.sleep(0.05)
+        else:
+            if self.direction == "LEFT":
+                if self.y < SAFE_LEFT_WALL + 0.1:
+                    self._cf.commander.send_position_setpoint(self.x, self.y + 0.1, DEFAULT_HEIGHT,
+                                                              yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                else:
+                    self._cf.commander.send_position_setpoint(self.x + 0.2, self.y, DEFAULT_HEIGHT, yaw_goal)
+                    self.direction = "RIGHT"
+                    time.sleep(0.5)
+            else:
+                if self.y > SAFE_RIGHT_WALL - 0.1:
+                    self._cf.commander.send_position_setpoint(self.x, self.y - 0.1, DEFAULT_HEIGHT,
+                                                              yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+                else:
+                    self._cf.commander.send_position_setpoint(self.x + 0.2, self.y, DEFAULT_HEIGHT,
+                                                              yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
+                    self.direction = "LEFT"
+                    time.sleep(0.5)  # Adjust sleep time based on responsiveness needs
+
     def print_state_info(self):
         state_repr: dict[FSM, str] = {
             FSM.INIT: f'',
@@ -454,26 +735,19 @@ class LoggingExample:
     def log_data(self):
         self.logs.append(
             [self.t, self.fsm, self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.vz, self.front, self.back, self.left,
-             self.right, self.up, self.down, self.az])
+             self.right, self.up, self.down, self.az, self.default_direction, self.orientation, self.direction])
 
     def occupancy_map(self):
+        measurements = np.array([self.front, self.left, self.back, self.right]) / 1000  # meters
         for j in range(4):  # 4 sensors
-            yaw_sensor = self.yaw + j * np.pi / 2  # yaw positive is counter clockwise
-            if j == 0:
-                measurement = self.front / 1000
-            elif j == 1:
-                measurement = self.left / 1000
-            elif j == 2:
-                measurement = self.back / 1000
-            elif j == 3:
-                measurement = self.right / 1000
-
+            yaw_sensor = self.yaw + j * np.pi / 2  # yaw positive is counterclockwise
+            measurement = measurements[j]
             for i in range(int(range_max / res_pos)):  # range is 2 meters
                 dist = i * res_pos
                 idx_x = int(np.round((self.x - min_x + dist * np.cos(yaw_sensor)) / res_pos, 0))
                 idx_y = int(np.round((self.y - min_y + dist * np.sin(yaw_sensor)) / res_pos, 0))
 
-                # make sure the current_setpoint is within the self.occ_map
+                # make sure the current set point is within the self.occ_map
                 if idx_x < 0 or idx_x >= self.occ_map.shape[0] or idx_y < 0 or idx_y >= self.occ_map.shape[1] or dist > range_max:
                     break
 
@@ -484,7 +758,6 @@ class LoggingExample:
                     self.occ_map[idx_x, idx_y] -= conf
                     break
         self.occ_map = np.clip(self.occ_map, -1, 1)  # certainty can never be more than 100%
-
 
 
 if __name__ == '__main__':
@@ -521,7 +794,9 @@ if __name__ == '__main__':
         df = pd.DataFrame(
             le.logs,
             columns=['t', 'fsm', 'x', 'y', 'z', 'yaw', 'vx', 'vy', 'vz',
-                     'front', 'back', 'left', 'right', 'up', 'down', 'az']
+                     'front', 'back', 'left', 'right', 'up', 'down', 'az',
+                     'default_direction', 'orientation', 'direction'
+                     ]
         )
         df.to_csv('logged_data.csv', index=False)
 
