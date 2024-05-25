@@ -36,8 +36,9 @@ import numpy as np
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.utils import uri_helper
+from matplotlib import pyplot as plt
 
-from spiral import archimedean_spiral, normalize_spiral
+from spiral import archimedean_spiral, normalize_spiral, circle, star
 
 uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
 
@@ -50,12 +51,19 @@ DEFAULT_HEIGHT = 0.3  #m
 DEFAULT_VELOCITY = 0.1  #m/s
 SAFE_RIGHT_WALL = 0.3  # meters
 SAFE_LEFT_WALL = 2.7  # meters
-INITIAL_X = 0.2
-INITIAL_Y = 0
+INITIAL_X = 0.3
+INITIAL_Y = 1.5
 GOAL_X = 1
 
 Z_REF_COUNTER = 20
-LANDING_PAD_SIZE = 0.30  # meters
+LANDING_PAD_SIZE = 0.30  # meters$
+
+range_max = 2  # meters
+res_pos = 0.2  # meters
+conf = 0.1
+min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X
+min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y
+
 
 
 class FSM(Enum):
@@ -82,7 +90,10 @@ class LoggingExample:
         """ Initialize and run the example with the specified link_uri """
         # Sensor values
         self.spiral_iter = 0
-        self.center_iter = 0
+        # self.center_iter = 0
+        self.take_off_iter = 0
+        self.pattern_iter = 0
+        self.finding_iter = 0
 
         self.x = 0
         self.y = 0
@@ -90,6 +101,7 @@ class LoggingExample:
         self.yaw = 0
         self.vx = 0
         self.vy = 0
+        self.vz = 0
         self.front = 0
         self.back = 0
         self.left = 0
@@ -108,14 +120,17 @@ class LoggingExample:
 
         # Data for FSM
         self.found_pos = None  # [x, y, z, yaw]
-        self.square_positions = []  # [[x, y], ...]
-        self.prev_square_pos = None
+        self.pattern_position = np.array([])  # [[x, y], ...]
+        # self.prev_square_pos = None
         self.centering_observations = []  # [[x, y, down], ...]
         self.landing_pos = None  # [x, y, z, yaw]
         self.landing_pad_reached = False
         self.spiral_coord = normalize_spiral(archimedean_spiral(num_points=500), fixed_norm=0.02)
 
         self.t = 0  # Iteration time
+
+        self.occ_map = np.zeros((int(5 / res_pos), int(3 / res_pos)))
+        self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.5), fixed_norm=0.01)
 
         self.actions: dict[FSM, callable] = {
             FSM.INIT: lambda x: time.sleep(1),
@@ -209,6 +224,7 @@ class LoggingExample:
 
         self.vx = data['stateEstimate.vx']
         self.vy = data['stateEstimate.vy']
+        self.vz = data['stateEstimate.vz']
         self.down = data['range.zrange']
         self.az = data['stateEstimate.az']
         self.down_buffer.append(self.down)
@@ -226,11 +242,13 @@ class LoggingExample:
         self.y = data['stateEstimate.y']
         self.z = data['stateEstimate.z']
         self.yaw = data['stabilizer.yaw']
-        self.front = data['range.front']
-        self.back = data['range.back']
-        self.left = data['range.left']
-        self.right = data['range.right']
+        self.back = min(data['range.back'], 2000)
+        self.left = min(data['range.left'], 2000)
+        self.front = min(data['range.front'], 2000)
+        self.right = min(data['range.right'], 2000)
         self.up = data['range.up']
+
+        self.occupancy_map()
 
         # global DEFAULT_HEIGHT
         # if self.z_ref_counter > 0:
@@ -273,40 +291,55 @@ class LoggingExample:
             self.fsm = FSM.TAKE_OFF
 
         elif self.fsm == FSM.TAKE_OFF:
+            self.take_off_iter += 1
+            if self.take_off_iter > 20 and self.z < 0.05:
+                self.fsm = FSM.STOP
+                print('Critical ERROR: Take off failed')
             if self.z > 0.20:
                 self.fsm = FSM.GOING_BACK if self.landing_pad_reached else FSM.CROSS
+                self.take_off_iter = 0
 
         elif self.fsm == FSM.CROSS:
             if self.x + INITIAL_X > GOAL_X:
                 self.fsm = FSM.SEARCH
 
         elif self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING or self.fsm == FSM.GOING_BACK:
-            # if np.mean(list(self.down_buffer)[:-3]) < 275:
-            if np.mean(list(self.down_buffer)[:-3]) < DEFAULT_HEIGHT - 25:
-                self.found_pos = [self.x, self.y, self.z, self.yaw]
-                self.found_vel = [self.vx, self.vy]
-                self.prev_square_pos = self.found_pos[:2]
-                self.fsm = FSM.FOUND
-                print(f'Found: {self.x:.3f}, {self.y:.3f}, {int(self.down)}')
-                print(f'Velocity: {self.vx:.3f}, {self.vy:.3f}')
-                print(f'Yaw: {np.arctan2(self.vy, self.vx):.3f}')
+            if self.az > 0.08:
+                if self.fsm != FSM.GOING_BACK or self.x < 0.3:
+                    self.found_pos = [self.x, self.y, self.z, self.yaw]
+                    yaw = np.arctan2(self.vy, self.vx)
+                    rotation_matrix = np.array([
+                        [np.cos(yaw), np.sin(yaw)],
+                        [-np.sin(yaw), np.cos(yaw)]
+                    ])
+                    pattern_pos = np.dot(self.circle_points, rotation_matrix)
+                    self.pattern_position = pattern_pos + self.found_pos[:2]
+                    self.found_vel = [self.vx, self.vy]
+                    self.prev_square_pos = self.found_pos[:2]
+                    self.fsm = FSM.FOUND
+                    print(f'Found: {self.x:.3f}, {self.y:.3f}, {int(self.down)}')
+                    print(f'Velocity: {self.vx:.3f}, {self.vy:.3f}')
+                    print(f'Yaw: {np.arctan2(self.vy, self.vx):.3f}')
 
             elif self.fsm == FSM.GOING_BACK:
                 if np.linalg.norm([self.x, self.y]) < 0.1:
                     self.fsm = FSM.SPIRALING
 
         elif self.fsm == FSM.FOUND:
-            self.square_positions = self.compute_square_positions()
-            print(f'Square positions: {self.square_positions}')
-            self.fsm = FSM.CENTERING
+            # self.square_positions = self.compute_square_positions()
+            # print(f'Square positions: {self.square_positions}')
+            if self.finding_iter == 5:
+                self.fsm = FSM.CENTERING
+                self.finding_iter = 0
 
         elif self.fsm == FSM.CENTERING:
-            if len(self.square_positions) == 0:
+            if self.pattern_iter == len(self.pattern_position):
                 # Save centering observations as dataframe
                 down_buffer_df = pd.DataFrame(np.array(self.down_buffer_data))
                 down_buffer_df.to_csv('down_buffer.csv', index=False)
                 self.landing_pos = self.compute_landing_pos()
                 self.centering_observations = []  # Reset centering observations for next landing
+                self.pattern_iter = 0
                 self.fsm = FSM.LANDING
 
         elif self.fsm == FSM.LANDING:
@@ -317,7 +350,7 @@ class LoggingExample:
             print("Invalid state")
 
     def take_off(self):
-        cf.commander.send_hover_setpoint(0, 0, 0, 0.5)
+        cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
         time.sleep(0.05)
 
     def rotate(self):
@@ -359,39 +392,57 @@ class LoggingExample:
         time.sleep(0.05)
 
     def finding(self):
-        x, y, _, yaw = self.found_pos
+        xf, xf, _, yaw = self.found_pos
+        x, y = self.pattern_position[0]
         # for i in range(20):
         cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+        self.finding_iter += 1
         time.sleep(0.05)
 
     def centering(self):
-        self.center_iter += 1
-        iter_num = 40  # Number of iterations to reach the next centering position
-        xf, yf, _, yawf = self.found_pos
-        x_prev, y_prev = self.prev_square_pos
-        x, y = self.square_positions[0]
-        delta_x = x - x_prev
-        delta_y = y - y_prev
-        if len(self.square_positions) > 0:
-            new_x = x_prev + delta_x * (self.center_iter / iter_num)
-            new_y = y_prev + delta_y * (self.center_iter / iter_num)
-        else:
-            new_x, new_y = (xf, yf)
-        self.centering_observations.append([self.x, self.y, self.down])
-        # print(f'Centering: {self.x:.3f}, {self.y:.3f}, {int(self.down)}, {int(self.down_range)}')
-        # print(f'Down buffer diff: {[d - self.down for d in self.down_buffer]}')
+        next_pos = self.pattern_position[self.pattern_iter]
+        x, y, _, yaw = self.found_pos
+
+        self.centering_observations.append([self.x, self.y, self.down, self.az])
         self.down_buffer_data.append([d for d in self.down_buffer])
-        cf.commander.send_position_setpoint(new_x, new_y, DEFAULT_HEIGHT, yawf)
-        time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
-        # print("Next centering position")
-        if len(self.square_positions) > 0 and self.center_iter > iter_num:
-            # Go to the next square position
-            self.prev_square_pos = self.square_positions[0]
-            self.square_positions = self.square_positions[1:]
-            self.center_iter = 0
+        # z_go = self.z * 0.99 + (DEFAULT_HEIGHT + 0.05) * 0.01
+        cf.commander.send_position_setpoint(next_pos[0], next_pos[1], DEFAULT_HEIGHT, yaw)
+        self.pattern_iter += 1
+        time.sleep(0.05)
+
+    # def centering2(self):
+    #     self.center_iter += 1
+    #     iter_num = 40  # Number of iterations to reach the next centering position
+    #     xf, yf, _, yawf = self.found_pos
+    #     x_prev, y_prev = self.prev_square_pos
+    #     x, y = self.pattern_position[0]
+    #     delta_x = x - x_prev
+    #     delta_y = y - y_prev
+    #     if len(self.pattern_position) > 0:
+    #         new_x = x_prev + delta_x * (self.center_iter / iter_num)
+    #         new_y = y_prev + delta_y * (self.center_iter / iter_num)
+    #     else:
+    #         new_x, new_y = (xf, yf)
+    #     self.centering_observations.append([self.x, self.y, self.down])
+    #     # print(f'Centering: {self.x:.3f}, {self.y:.3f}, {int(self.down)}, {int(self.down_range)}')
+    #     # print(f'Down buffer diff: {[d - self.down for d in self.down_buffer]}')
+    #     self.down_buffer_data.append([d for d in self.down_buffer])
+    #     cf.commander.send_position_setpoint(new_x, new_y, DEFAULT_HEIGHT, yawf)
+    #     time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+    #     # print("Next centering position")
+    #     if len(self.pattern_position) > 0 and self.center_iter > iter_num:
+    #         # Go to the next square position
+    #         self.prev_square_pos = self.pattern_position[0]
+    #         self.pattern_position = self.pattern_position[1:]
+    #         self.center_iter = 0
 
     def landing(self):
         x, y, _, yaw = self.landing_pos
+
+        for i in range(10):
+            cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+            time.sleep(0.05)
+
         iter_num = 30
         for i in range(iter_num + 20):
             cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT - (DEFAULT_HEIGHT / iter_num) * i, yaw)
@@ -405,7 +456,18 @@ class LoggingExample:
         cf.commander.send_stop_setpoint()
         self._cf.close_link()
         time.sleep(0.05)
-        exit(0)
+
+
+    def compute_landing_pos2(self):
+        observations = np.array(self.centering_observations)
+        azs = observations[:, -1]
+        mask = np.full(len(observations), np.nan)
+        mask[azs > 0.08] = 1
+        mask[azs < 0.08] = -1
+
+        window_size = 10
+        for i in range(window_size, len(mask)):
+            pass
 
     def compute_landing_pos(self):
         observations = np.array(self.centering_observations)
@@ -475,8 +537,37 @@ class LoggingExample:
 
     def log_data(self):
         self.logs.append(
-            [self.t, self.fsm, self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.front, self.back, self.left,
+            [self.t, self.fsm, self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.vz, self.front, self.back, self.left,
              self.right, self.up, self.down, self.down_buffer, self.z_ref, self.az])
+
+    def occupancy_map(self):
+        for j in range(4):  # 4 sensors
+            yaw_sensor = self.yaw + j * np.pi / 2  # yaw positive is counter clockwise
+            if j == 0:
+                measurement = self.front / 1000
+            elif j == 1:
+                measurement = self.left / 1000
+            elif j == 2:
+                measurement = self.back / 1000
+            elif j == 3:
+                measurement = self.right / 1000
+
+            for i in range(int(range_max / res_pos)):  # range is 2 meters
+                dist = i * res_pos
+                idx_x = int(np.round((self.x - min_x + dist * np.cos(yaw_sensor)) / res_pos, 0))
+                idx_y = int(np.round((self.y - min_y + dist * np.sin(yaw_sensor)) / res_pos, 0))
+
+                # make sure the current_setpoint is within the self.occ_map
+                if idx_x < 0 or idx_x >= self.occ_map.shape[0] or idx_y < 0 or idx_y >= self.occ_map.shape[1] or dist > range_max:
+                    break
+
+                # update the self.occ_map
+                if dist < measurement:
+                    self.occ_map[idx_x, idx_y] += conf
+                else:
+                    self.occ_map[idx_x, idx_y] -= conf
+                    break
+        self.occ_map = np.clip(self.occ_map, -1, 1)  # certainty can never be more than 100%
 
 
 
@@ -506,10 +597,6 @@ if __name__ == '__main__':
         print(f'Time: {t1 - t0:.3f}', end=' ')
         le.print_state_info()
 
-        if le.z < 0:
-            print('Critical ERROR')
-            le.fsm = FSM.STOP
-
         if enable_log_data:
             le.log_data()
 
@@ -517,11 +604,15 @@ if __name__ == '__main__':
     if enable_log_data:
         df = pd.DataFrame(
             le.logs,
-            columns=['t', 'fsm', 'x', 'y', 'z', 'yaw', 'vx', 'vy',
+            columns=['t', 'fsm', 'x', 'y', 'z', 'yaw', 'vx', 'vy', 'vz',
                      'front', 'back', 'left', 'right', 'up', 'down',
                      'down_buffer', 'z_ref', 'az']
         )
         df.to_csv('logged_data.csv', index=False)
 
-
-
+        # Save occupancy map
+        plt.imshow(np.flip(le.occ_map, 1), vmin=-1, vmax=1, cmap='gray',
+                   origin='lower')  # flip the map to match the coordinate system
+        plt.savefig("occ_map.png")
+        plt.close()
+        print("Logging Succesfull")

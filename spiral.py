@@ -4,6 +4,36 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
+def star(radius=1):
+    # Generate theta values from 0 to 2*pi
+    theta = np.linspace(0, 2 * np.pi, 6)[:-1]
+    print(theta)
+    order = [0, 2, 4, 1, 3]
+    theta = theta[order]
+    # Compute the corresponding x and y values
+    x = radius * np.cos(theta)
+    y = radius * np.sin(theta)
+
+    # Add origin at beginning and end
+    x = np.concatenate([[0], x, [0]])
+    y = np.concatenate([[0], y, [0]])
+
+    points = np.array([x, y]).T
+    return points
+
+def circle(radius=1, num_points=100):
+    # Generate theta values from 0 to 2*pi
+    theta = np.linspace(0, 2 * np.pi, num_points)
+
+    # Compute the corresponding x and y values
+    x = radius * np.cos(theta)
+    y = radius * np.sin(theta)
+    x = np.concatenate([[0], x, [0]])
+    y = np.concatenate([[0], y, [0]])
+    points = np.array([x, y]).T
+    return points
+
+
 def archimedean_spiral(a=0, b=0.02, theta_max=10*np.pi, num_points=200):
     # Generate theta values from 0 to theta_max
     theta = np.linspace(0, theta_max, num_points)
@@ -61,3 +91,5 @@ if __name__ == '__main__':
     a = 0
     b = 0.035
     plot_spiral(a, b)
+
+    print(star())
