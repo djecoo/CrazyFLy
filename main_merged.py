@@ -37,7 +37,6 @@ from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.utils import uri_helper
 from matplotlib import pyplot as plt
-
 from spiral import archimedean_spiral, normalize_spiral, circle, star
 
 uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
@@ -53,7 +52,10 @@ LANDING_PAD_SIZE = 0.30
 # General Navigation
 DEFAULT_HEIGHT = 0.3  #m
 DEFAULT_VELOCITY = 0.1  #m/s
-GOAL_X = 1
+GOAL_X = 3.5  # Landing zone
+RETURN_GOAL_X = 1.5  # Take off zone
+AZ_THRESHOLD = 0.08  #m/s^2  Detecting landing pad
+ORIGIN_THRESHOLD = 0.1  #m   Start spiraling
 
 # Obstacle avoidance params
 SAFE_DISTANCE = 400  #sensor reading
@@ -65,8 +67,8 @@ SAFE_LEFT_WALL = 2.7 - INITIAL_Y
 range_max = 2  # meters
 res_pos = 0.2  # meters
 conf = 0.1
-min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X  # x valid values
-min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y  # y valid values
+min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X  # x valid map values
+min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y  # y valid map values
 
 
 class FSM(Enum):
@@ -353,8 +355,8 @@ class LoggingExample:
                 self.fsm = FSM.SEARCH
 
         elif self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING or self.fsm == FSM.GOING_BACK:
-            if self.az > 0.08:
-                if self.fsm != FSM.GOING_BACK or self.x < 0.3:
+            if self.az > AZ_THRESHOLD:
+                if self.fsm != FSM.GOING_BACK or self.x < RETURN_GOAL_X:
                     self.found_pos = [self.x, self.y, self.z, self.yaw]
                     yaw = np.arctan2(self.vy, self.vx)
                     rotation_matrix = np.array([
@@ -371,7 +373,7 @@ class LoggingExample:
                     print(f'Yaw: {np.arctan2(self.vy, self.vx):.3f}')
 
             elif self.fsm == FSM.GOING_BACK:
-                if np.linalg.norm([self.x, self.y]) < 0.1:
+                if np.linalg.norm([self.x, self.y]) < ORIGIN_THRESHOLD:
                     self.fsm = FSM.SPIRALING
 
         elif self.fsm == FSM.FOUND:
@@ -381,9 +383,6 @@ class LoggingExample:
 
         elif self.fsm == FSM.CENTERING:
             if self.pattern_iter == len(self.pattern_position):
-                # Save centering observations as dataframe
-                down_buffer_df = pd.DataFrame(np.array(self.down_buffer_data))
-                down_buffer_df.to_csv('down_buffer.csv', index=False)
                 self.landing_pos = self.compute_landing_pos()
                 self.centering_observations = []  # Reset centering observations for next landing
                 self.pattern_iter = 0
@@ -397,20 +396,14 @@ class LoggingExample:
             print("Invalid state")
 
     def take_off(self):
+        # TODO: Maybe implement take off routine as a send_position_setpoint ???
+        # cf.commander.send_position_setpoint(0, 0, DEFAULT_HEIGHT, 0)
         cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
         time.sleep(0.05)
 
-    def rotate(self):
-        cf.commander.send_hover_setpoint(0, 0, 30, DEFAULT_HEIGHT)
-        time.sleep(0.05)
-
-    def cross(self):
-        cf.commander.send_position_setpoint(self.x + DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.05)
-
-    def search(self):
-        cf.commander.send_position_setpoint(self.x + DEFAULT_VELOCITY, self.y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.05)
+    # def rotate(self):
+    #     cf.commander.send_hover_setpoint(0, 0, 30, DEFAULT_HEIGHT)
+    #     time.sleep(0.05)
 
     def going_back(self):
         vector = -np.array([self.x, self.y])
@@ -432,7 +425,6 @@ class LoggingExample:
         time.sleep(0.05)
 
     def finding(self):
-        xf, xf, _, yaw = self.found_pos
         x, y = self.pattern_position[0]
         cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
         self.finding_iter += 1
@@ -440,7 +432,6 @@ class LoggingExample:
 
     def centering(self):
         next_pos = self.pattern_position[self.pattern_iter]
-        x, y, _, yaw = self.found_pos
 
         self.centering_observations.append([self.x, self.y, self.down, self.az])
         self.down_buffer_data.append([d for d in self.down_buffer])
