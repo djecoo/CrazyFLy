@@ -38,7 +38,7 @@ from cflib.crazyflie.log import LogConfig
 from cflib.utils import uri_helper
 from matplotlib import pyplot as plt
 
-from spiral import archimedean_spiral, normalize_spiral, circle, star
+from spiral import archimedean_spiral, normalize_spiral, circle, star, line
 
 uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
 
@@ -119,6 +119,7 @@ class LoggingExample:
 
         # Data for FSM
         self.found_pos = None  # [x, y, z, yaw]
+        self.falling_edge_pos = None  # [x, y]
         self.pattern_position = np.array([])  # [[x, y], ...]
         # self.prev_square_pos = None
         self.centering_observations = []  # [[x, y, down], ...]
@@ -129,7 +130,7 @@ class LoggingExample:
         self.t = 0  # Iteration time
 
         self.occ_map = np.zeros((int(5 / res_pos), int(3 / res_pos)))
-        self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.2), fixed_norm=0.01)
+        self.circle_points = normalize_spiral(line(), fixed_norm=0.01)
 
         self.actions: dict[FSM, callable] = {
             FSM.INIT: lambda x: time.sleep(1),
@@ -311,15 +312,17 @@ class LoggingExample:
                     self.fsm = FSM.SPIRALING
 
         elif self.fsm == FSM.FOUND:
-            if self.finding_iter == 5:
+            if self.finding_iter == 100:
                 self.fsm = FSM.CENTERING
                 self.finding_iter = 0
 
         elif self.fsm == FSM.CENTERING:
-            if self.pattern_iter == len(self.pattern_position):
+            if self.az < -0.05:
+            # if self.pattern_iter == len(self.pattern_position):
                 # Save centering observations as dataframe
                 down_buffer_df = pd.DataFrame(np.array(self.down_buffer_data))
                 down_buffer_df.to_csv('down_buffer.csv', index=False)
+                self.falling_edge_pos = [self.x, self.y]
                 self.landing_pos = self.compute_landing_pos()
                 self.centering_observations = []  # Reset centering observations for next landing
                 self.pattern_iter = 0
@@ -375,20 +378,34 @@ class LoggingExample:
         time.sleep(0.05)
 
     def finding(self):
-        xf, xf, _, yaw = self.found_pos
+        xf, yf, _, yaw = self.found_pos
         x, y = self.pattern_position[0]
-        cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+        vx, vy = self.found_vel
+        direction = np.arctan2(vy, vx)
+        delta_vec = np.array([np.cos(direction), np.sin(direction)]) * 0.10
+        # print(x, y, x + delta_vec, y + delta_vec, DEFAULT_HEIGHT, yaw)
+        cf.commander.send_position_setpoint(xf + delta_vec[0], yf + delta_vec[1], DEFAULT_HEIGHT, yaw)
         self.finding_iter += 1
         time.sleep(0.05)
 
     def centering(self):
         next_pos = self.pattern_position[self.pattern_iter]
         x, y, _, yaw = self.found_pos
+        vx, vy = self.found_vel
+        direction = np.arctan2(vy, vx)
+
+        vec = np.array([0, -DEFAULT_VELOCITY])
+        rotation_matrix = np.array([
+            [np.cos(direction), np.sin(direction)],
+            [-np.sin(direction), np.cos(direction)]
+        ])
+        vec = np.dot(vec, rotation_matrix)
 
         self.centering_observations.append([self.x, self.y, self.down, self.az])
         self.down_buffer_data.append([d for d in self.down_buffer])
         # z_go = self.z * 0.99 + (DEFAULT_HEIGHT + 0.05) * 0.01
-        cf.commander.send_position_setpoint(next_pos[0], next_pos[1], DEFAULT_HEIGHT, yaw)
+        # cf.commander.send_position_setpoint(next_pos[0], next_pos[1], DEFAULT_HEIGHT, yaw)
+        cf.commander.send_position_setpoint(self.x + vec[0], self.y + vec[1], DEFAULT_HEIGHT, yaw)
         self.pattern_iter += 1
         time.sleep(0.05)
 
@@ -415,25 +432,19 @@ class LoggingExample:
         time.sleep(0.05)
 
     def compute_landing_pos(self):
-        observations = np.array(self.centering_observations)
-        obs_delta = observations[1:, 2] - observations[:-1, 2]
-        rising_edge = np.where(obs_delta > 17)[0]  # Going up on the pad
-        falling_edge = np.where(obs_delta < -17)[0]  # Falling off the pad
-        mask = np.full(len(observations), np.nan)
-        mask[rising_edge] = True
-        mask[falling_edge] = False
-        current = True
-        for i in range(len(mask)):
-            if np.isnan(mask[i]):
-                mask[i] = current
-            else:
-                current = mask[i]
-        mask = mask.astype(bool)
-        print("Mask")
-        print(mask)
-        masked_obs = observations[mask]
-        land_pos = np.mean(masked_obs[:, :2], axis=0)
-        return [land_pos[0], land_pos[1], self.found_pos[2], self.found_pos[3]]
+        _, _, _, yaw = self.found_pos
+        xf, yf = self.falling_edge_pos[:2]
+        vx, vy = self.found_vel
+        direction = np.arctan2(vy, vx)
+
+        vec = np.array([0.05, 0.15])
+        rotation_matrix = np.array([
+            [np.cos(direction), np.sin(direction)],
+            [-np.sin(direction), np.cos(direction)]
+        ])
+        vec = np.dot(vec, rotation_matrix)
+        return [xf + vec[0], yf + vec[1], DEFAULT_HEIGHT, yaw]
+
 
     def print_state_info(self):
         state_repr: dict[FSM, str] = {

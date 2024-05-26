@@ -70,6 +70,13 @@ def normalize_spiral(spiral_coords, fixed_norm=0.05):
     return new_coords
 
 
+def line():
+    x = [0, 0]
+    y = [0, -1]
+    points = np.array([x, y]).T
+    return points
+
+
 def plot_spiral(a, b, theta_max=10 * np.pi, num_points=1000):
     p = archimedean_spiral(a, b, theta_max, num_points)
     p = normalize_spiral(p)
