@@ -261,6 +261,8 @@ class LoggingExample:
         self.right = min(data['range.right'], 2000)
         self.up = data['range.up']
 
+        self.occupancy_map()
+
         if np.abs(self.yaw) <= 45:
             self.front = data['range.front']
             self.back = data['range.back']
@@ -313,7 +315,6 @@ class LoggingExample:
             else:
                 self.default_direction = 'LEFT'
 
-        self.occupancy_map()
 
     def _connection_failed(self, link_uri, msg):
         """Callback when connection initial connection fails (i.e no Crazyflie
@@ -346,7 +347,7 @@ class LoggingExample:
             if self.take_off_iter > 20 and self.z < 0.05:
                 self.fsm = FSM.STOP
                 print('Critical ERROR: Take off failed')
-            if self.z > 0.20:
+            if self.z > DEFAULT_HEIGHT - 0.05:
                 self.fsm = FSM.GOING_BACK if self.landing_pad_reached else FSM.CROSS
                 self.take_off_iter = 0
 
