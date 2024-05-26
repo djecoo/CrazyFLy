@@ -38,21 +38,22 @@ from cflib.crazyflie.log import LogConfig
 from cflib.utils import uri_helper
 from matplotlib import pyplot as plt
 from spiral import archimedean_spiral, normalize_spiral, circle, star
-
+from a_star_algo import a_star_search
 uri = uri_helper.uri_from_env(default='radio://0/60/2M/E7E7E7E716')
+from rdp import rdp
 
 # Only output errors from the logging framework
 logging.basicConfig(level=logging.ERROR)
 
 # Initial Position
-INITIAL_X = 0.3
-INITIAL_Y = 1.5
+INITIAL_X = 0.2
+INITIAL_Y = 1.7
 LANDING_PAD_SIZE = 0.30
 
 # General Navigation
 DEFAULT_HEIGHT = 0.3  #m
-DEFAULT_VELOCITY = 0.1  #m/s
-GOAL_X = 3.5  # Landing zone
+DEFAULT_VELOCITY = 0.4  #m/s
+GOAL_X = 2  # Landing zone
 RETURN_GOAL_X = 1.5  # Take off zone
 AZ_THRESHOLD = 0.08  #m/s^2  Detecting landing pad
 ORIGIN_THRESHOLD = 0.1  #m   Start spiraling
@@ -60,16 +61,18 @@ ORIGIN_THRESHOLD = 0.1  #m   Start spiraling
 # Obstacle avoidance params
 SAFE_DISTANCE = 400  #sensor reading
 SAFE_DISTANCE_LP = 200 # Sensor reading in lp zone
-SAFE_RIGHT_WALL = 0.3 - INITIAL_X
+SAFE_RIGHT_WALL = 0.3 - INITIAL_Y
 SAFE_LEFT_WALL = 2.7 - INITIAL_Y
 
 # Occupancy grid parameters
-range_max = 2  # meters
-res_pos = 0.2  # meters
+range_max = 2.  # meters
+res_pos = 0.15# meters
 conf = 0.1
-min_x, max_x = 0 - INITIAL_X, 5 - INITIAL_X  # x valid map values
-min_y, max_y = 0 - INITIAL_Y, 3 - INITIAL_Y  # y valid map values
+min_x, max_x = 0 , 5   # x valid map values
+min_y, max_y = 0 , 3  # y valid map values
 
+limit_right = 0.4
+limit_left = 2.7
 
 class FSM(Enum):
     INIT = 'init'
@@ -99,6 +102,8 @@ class LoggingExample:
         self.take_off_iter = 0
         self.pattern_iter = 0
         self.finding_iter = 0
+        self.path_iter = 0
+        self.path_iter_first = 0
 
         self.x = 0
         self.y = 0
@@ -131,9 +136,9 @@ class LoggingExample:
 
         self.t = 0  # Iteration time
 
-        self.occ_map = np.zeros((int(5 / res_pos), int(3 / res_pos)))
+        self.occ_map = np.ones((int(5 / res_pos), int(3 / res_pos)))
         self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.5), fixed_norm=0.01)
-
+        self.path = None
         # Obstacle avoidance data
         self.default_direction = 'RIGHT'
         self.orientation = 'DEVANT'
@@ -145,11 +150,16 @@ class LoggingExample:
         self.save_x_pos = None
         self.save_y_pos = None
 
+        self.path_looking = np.array([[3.6,limit_left],[3.6,limit_right ],[3.9,limit_right ],
+                        [3.9,limit_left ],[4.2,limit_left ],[4.2,limit_right ],
+                        [4.5,limit_right ],[4.5,limit_left ],[4.7,limit_left ],
+                        [4.7,limit_right ]]) - np.array([INITIAL_X, INITIAL_Y])
+        self.path_looking_index = 0
+
         self.actions: dict[FSM, callable] = {
             FSM.INIT: lambda x: time.sleep(0.05),
             FSM.TAKE_OFF: self.take_off,
-            FSM.ROTATE: self.rotate,  # Not used in this code
-            FSM.CROSS: self.move_command,  # Not used in this code
+            FSM.CROSS: self.move_command,  
             FSM.SEARCH: self.search_landing_pad,
             FSM.FOUND: self.finding,
             FSM.CENTERING: self.centering,
@@ -255,10 +265,10 @@ class LoggingExample:
         self.y = data['stateEstimate.y']
         self.z = data['stateEstimate.z']
         self.yaw = data['stabilizer.yaw']
-        self.back = min(data['range.back'], 2000)
-        self.left = min(data['range.left'], 2000)
-        self.front = min(data['range.front'], 2000)
-        self.right = min(data['range.right'], 2000)
+        self.back = min(data['range.back'], 1000*range_max)
+        self.left = min(data['range.left'], 1000*range_max)
+        self.front = min(data['range.front'], 1000*range_max)
+        self.right = min(data['range.right'], 1000*range_max)
         self.up = data['range.up']
 
         self.occupancy_map()
@@ -293,6 +303,7 @@ class LoggingExample:
             self.right = data['range.left']
             self.orientation = 'RETOURNE'
             #print('RETOURNE')
+        
 
         if self.orientation == 'DEVANT':
             if self.yaw >= 0:
@@ -354,8 +365,10 @@ class LoggingExample:
         elif self.fsm == FSM.CROSS:
             if self.x + INITIAL_X > GOAL_X:
                 self.fsm = FSM.SEARCH
+                self.path = None
+                self.path_iter_first = 0
 
-        elif self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING or self.fsm == FSM.GOING_BACK:
+        elif self.fsm == FSM.SEARCH or self.fsm == FSM.SPIRALING or self.fsm == FSM.GOING_BACK :
             if self.az > AZ_THRESHOLD:
                 if self.fsm != FSM.GOING_BACK or self.x < RETURN_GOAL_X:
                     self.found_pos = [self.x, self.y, self.z, self.yaw]
@@ -393,26 +406,43 @@ class LoggingExample:
             self.fsm = FSM.STOP if self.landing_pad_reached else FSM.TAKE_OFF
             self.landing_pad_reached = True
 
+            start_node = [int(np.round((self.x +INITIAL_X)/res_pos,0)),int((self.y + INITIAL_Y)/res_pos)]
+            end_node = [int(np.round((INITIAL_X)/res_pos,0)),int((INITIAL_Y)/res_pos)]
+
+            if self.occ_map is not None:
+                self.path = a_star_search(np.array(self.occ_map), start_node, end_node,self)
+            if self.path is not None and (np.any(self.path)):
+                
+                #rdp algorithm to simplify the path
+                self.path = rdp(self.path,epsilon=1)
+                self.path = normalize_spiral(np.array(self.path),fixed_norm=0.01)
+                
+
+                
+            
         else:
             print("Invalid state")
 
     def take_off(self):
         # TODO: Maybe implement take off routine as a send_position_setpoint ???
         # cf.commander.send_position_setpoint(0, 0, DEFAULT_HEIGHT, 0)
-        cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
+        self._cf.commander.send_hover_setpoint(0, 0, 0, DEFAULT_HEIGHT)
         time.sleep(0.05)
 
     # def rotate(self):
     #     cf.commander.send_hover_setpoint(0, 0, 30, DEFAULT_HEIGHT)
     #     time.sleep(0.05)
-
+    def distance_2d(self,x1,y1,x2,y2):
+        return np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    
     def going_back(self):
-        vector = -np.array([self.x, self.y])
-        if np.linalg.norm(vector) > DEFAULT_VELOCITY:
-            vector = (vector / np.linalg.norm(vector)) * DEFAULT_VELOCITY
-            cf.commander.send_position_setpoint(self.x + vector[0], self.y + vector[1], DEFAULT_HEIGHT, 0)
-        else:
-            cf.commander.send_position_setpoint(0, 0, DEFAULT_HEIGHT, 0)
+        
+        dist = self.distance_2d(self.x,self.y,self.path[self.path_iter][0],self.path[self.path_iter][1])
+
+        if dist < 0.1 and self.path_iter <= len(self.path) - 2:
+            self.path_iter +=1
+       
+        self._cf.commander.send_position_setpoint(self.path[self.path_iter][0]*res_pos - INITIAL_X, self.path[self.path_iter][1]*res_pos-INITIAL_Y, DEFAULT_HEIGHT, 0)
         time.sleep(0.05)
 
     def spiraling(self):
@@ -422,22 +452,23 @@ class LoggingExample:
             self.landing_pos = [x, y, DEFAULT_HEIGHT, 0]
             self.fsm = FSM.LANDING
             print("Spiral finished----------------------------")
-        cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, 0)
+        self._cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, 0)
         time.sleep(0.05)
 
     def finding(self):
         x, y = self.pattern_position[0]
-        cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+        _, _, _, yaw = self.found_pos
+        self._cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
         self.finding_iter += 1
         time.sleep(0.05)
 
     def centering(self):
         next_pos = self.pattern_position[self.pattern_iter]
-
+        x, y, _, yaw = self.found_pos
         self.centering_observations.append([self.x, self.y, self.down, self.az])
         self.down_buffer_data.append([d for d in self.down_buffer])
         # z_go = self.z * 0.99 + (DEFAULT_HEIGHT + 0.05) * 0.01
-        cf.commander.send_position_setpoint(next_pos[0], next_pos[1], DEFAULT_HEIGHT, yaw)
+        self._cf.commander.send_position_setpoint(next_pos[0], next_pos[1], DEFAULT_HEIGHT, yaw)
         self.pattern_iter += 1
         time.sleep(0.05)
 
@@ -446,20 +477,20 @@ class LoggingExample:
         x, y, _, yaw = self.landing_pos
 
         for i in range(10):
-            cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
+            self._cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT, yaw)
             time.sleep(0.05)
 
         iter_num = 30
         for i in range(iter_num + 20):
-            cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT - (DEFAULT_HEIGHT / iter_num) * i, yaw)
+            self._cf.commander.send_position_setpoint(x, y, DEFAULT_HEIGHT - (DEFAULT_HEIGHT / iter_num) * i, yaw)
             if i > iter_num:
-                cf.commander.send_stop_setpoint()
+                self._cf.commander.send_stop_setpoint()
                 # print('Landing')
                 self.print_state_info()
             time.sleep(0.1)
 
     def stop(self):
-        cf.commander.send_stop_setpoint()
+        self._cf.commander.send_stop_setpoint()
         self._cf.close_link()
         time.sleep(0.05)
 
@@ -493,8 +524,6 @@ class LoggingExample:
         if self.front < SAFE_DISTANCE:
             # If obstacle detected in front, move left or right based on left and right sensor readings
             if self.default_direction == 'RIGHT':
-                print("Hi")
-                print(self.y)
                 if self.y > SAFE_LEFT_WALL:
                     # Move right
                     return (0, DEFAULT_VELOCITY), (self.x, self.y - DEFAULT_VELOCITY)
@@ -502,7 +531,7 @@ class LoggingExample:
                     # Move left
                     return (0, DEFAULT_VELOCITY), (self.x, self.y + DEFAULT_VELOCITY)
             else:
-                print("Hello")
+                
                 print(self.y)
                 if self.y < SAFE_RIGHT_WALL:
                     # Move right
@@ -545,22 +574,56 @@ class LoggingExample:
             'back': self.back,
             'left': self.left
         }
-
+        
         # Find the direction with the maximum sensor value
         max_direction = max(sensor_values, key=sensor_values.get)
         max_value = sensor_values[max_direction]
 
         # Print the result
-        yaw_goal = self.yaw + 10
+        
+        yaw_goal = np.sin(self.t*np.pi/15)
+        yaw_goal = 10*yaw_goal
         yaw_goal = self.clip_angle(yaw_goal)
+        
 
-        if self.is_obstacle_close():
+        if self.t%20 == 0:
+            start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
+            end_node = [int((self.x +INITIAL_X + 2)/res_pos + 0.5),int((self.y +INITIAL_Y)/res_pos + 0.5)]
+            path_test = a_star_search(np.array(self.occ_map), start_node, end_node,self)
+            
+            if path_test is not None:
+                self.path = np.array(path_test) * res_pos
+                self.path -= np.array([INITIAL_X, INITIAL_Y])
+            
+                """  if self.path is not None and (np.any(self.path)):
+                
+                #rdp algorithm to simplify the path
+                self.path = rdp(self.path,epsilon=1)
+                self.path[0] = [self.x,self.y]
+                self.path = normalize_spiral(np.array(self.path),fixed_norm=0.01)  """
+                self.path_iter_first = 0
+            
+
+        if self.path is not None:
+            dist = self.distance_2d(self.x,self.y,self.path[self.path_iter_first][0],self.path[self.path_iter_first][1])
+            
+            
+            if (dist<0.06) and self.path_iter_first <= len(self.path)-2:
+                self.path_iter_first +=1
+            self._cf.commander.send_position_setpoint(self.path[self.path_iter_first][0] , self.path[self.path_iter_first][1], DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+        else:
+            self._cf.commander.send_position_setpoint(self.x, self.y, DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+            
+
+        """ if self.is_obstacle_close():
             velocity, position = self.obstacle_avoidance_routine()
             self._cf.commander.send_position_setpoint(position[0], position[1], DEFAULT_HEIGHT, yaw_goal)
             time.sleep(0.05)
         else:
             self._cf.commander.send_position_setpoint(self.x + 0.1, self.y, DEFAULT_HEIGHT, yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
-            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs
+            time.sleep(0.05)  # Adjust sleep time based on responsiveness needs """
 
     def is_obstacle_close_lp(self):
         sensor_data = [self.back, self.front, self.left, self.right]
@@ -570,6 +633,9 @@ class LoggingExample:
             return sensor_data[3] < SAFE_DISTANCE_LP
 
     def obstacle_avoidance_left(self):
+        
+            
+            
         self.save_x_pos = self.x
         self.save_y_pos = self.y
         while True:
@@ -609,7 +675,7 @@ class LoggingExample:
                     self.pass_obstacle = False
                     self.x_goback = False
                     break
-
+ 
     def obstacle_avoidance_right(self):
         self.save_x_pos = self.x
         self.save_y_pos = self.y
@@ -679,11 +745,45 @@ class LoggingExample:
         max_direction = max(sensor_values, key=sensor_values.get)
         max_value = sensor_values[max_direction]
 
-        # Print the result
-        yaw_goal = self.yaw + 10
+        yaw_goal = np.sin(self.t*np.pi/20)
+        yaw_goal = 10*yaw_goal
         yaw_goal = self.clip_angle(yaw_goal)
+        dist = self.distance_2d(self.x,self.y,self.path_looking[self.path_looking_index,0],self.path_looking[self.path_looking_index,1])
+        print(self.path)
+        if dist < 0.1:
+            self.path_looking_index +=1
+        
+        if self.path is None or self.t%30 == 0:
+            self.update_path_looking()
 
-        # Check for obstacle proximity
+        if self.path is None or self.t%20==0:
+            
+            start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
+            end_node = [int((self.path_looking[self.path_looking_index,0] +INITIAL_X)/res_pos + 0.5),
+                        int((self.path_looking[self.path_looking_index,1] +INITIAL_Y)/res_pos + 0.5)]
+
+            print(start_node,end_node)
+            path_test = a_star_search(np.array(self.occ_map), start_node, end_node,self)
+            if path_test is not None:
+                self.path = np.array(path_test) * res_pos
+                self.path -= np.array([INITIAL_X, INITIAL_Y])
+            
+                self.path_iter_first = 0
+
+        if self.path is not None:
+            dist = self.distance_2d(self.x,self.y,self.path[self.path_iter_first][0],self.path[self.path_iter_first][1])
+            if (dist<0.06) and self.path_iter_first <= len(self.path)-2:
+                self.path_iter_first +=1
+            self._cf.commander.send_position_setpoint(self.path[self.path_iter_first][0] , self.path[self.path_iter_first][1], DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+        else:
+            self._cf.commander.send_position_setpoint(self.x, self.y, DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+
+            
+        
+
+        """ # Check for obstacle proximity
         if self.is_obstacle_close_lp():
             self.obstacle_avoidance_lp()
             time.sleep(0.05)
@@ -707,13 +807,87 @@ class LoggingExample:
                                                               yaw_goal)  # Target x=3 meters, y=0 (no change), z=0.5 meters
                     self.direction = "LEFT"
                     time.sleep(0.5)  # Adjust sleep time based on responsiveness needs
+ """
+    def update_path_looking(self):
+        
+        for i in range(len(self.path_looking)):
 
+            path_point = self.path_looking[i] + np.array([INITIAL_X, INITIAL_Y])
+            check = True
+            #distance to move
+            translate_dist = 0.1
+            #define right or left side
+            direction = True
+            if path_point[1] < 1.5:
+                direction = False
+            loop_number = 0
+
+            #while the number is not true
+            while check and loop_number <= 10:
+                #check if we are close to an obstacles
+                check = self.is_closed_obstacle(path_point)
+                
+                #if we are close to an obstacle
+                if direction and check:
+                    #new coordinate
+                    offset = path_point[1] - translate_dist
+                    #dont get outside the map
+                    if offset < 0.1: offset = 0.1
+                    #update the path
+                    self.path_looking[i] = [path_point[0], path_point[1]] - np.array([INITIAL_X, INITIAL_Y])
+                    
+                elif check:
+                    #new coordinate
+                    offset = path_point[1] + translate_dist
+                    #dont get outside the map
+                    if offset > 2.9: offset = 2.9
+                    #update the path
+                    self.path_looking[i] = [path_point[0], path_point[1]] - np.array([INITIAL_X, INITIAL_Y])
+                    
+                loop_number += 1
+        return
+
+#check if we are too close to an obstacle     
+    def is_closed_obstacle(self,path_point):
+        #update the distance to check so that we dont go away from the side
+        if path_point[0] > 4.7:
+            dist_x_top = 0
+        else:
+            dist_x_top = 2
+
+        if path_point[1] <= 0.2:
+            dist_y_right = 0
+        else: 
+            dist_y_right = 3
+
+        if path_point[1] >2.7:
+            dist_y_left = 0
+        else:
+            dist_y_left = 3
+        dist_x_bottom = 2
+        
+        #convert to map reference frame
+        [int(( +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
+        x_on_map = int((path_point[0]+INITIAL_X )/res_pos +0.5)
+        y_on_map = int((path_point[1]+INITIAL_Y )/res_pos +0.5)
+
+        #check the surronding
+        matches1 = np.where(self.occ_map[x_on_map - dist_x_bottom : x_on_map + dist_x_top, 
+                                y_on_map - dist_y_right: y_on_map + dist_y_left] <-0.3)
+        if len(matches1[0]) >0 :
+            #no clean surrounding
+            return True
+        else: 
+            #clean surrondings
+            return False
+
+    
     def print_state_info(self):
         state_repr: dict[FSM, str] = {
             FSM.INIT: f'',
             FSM.TAKE_OFF: f'down range: {int(self.down)} - z: {self.z:.3f} - az: {self.az:.3f}',
             FSM.ROTATE: f'',
-            FSM.CROSS: f'x: {self.x:.3f}, y: {self.y:.3f}, yaw: {self.yaw:.3f}',
+            FSM.CROSS: f'x: {self.x:.3f}, y: {self.y:.3f}, yaw: {self.yaw:.3f}, FRONT: {self.front:.3f}',
             FSM.SEARCH: f'x: {self.x:.3f}, y: {self.y:.3f}, yaw: {self.yaw:.3f}, {self.az:.3f}',
             FSM.FOUND: f'down range: {int(self.down)} - z: {self.z:.3f} - az: {self.az:.3f}',
             FSM.CENTERING: f'down range: {int(self.down)} - z: {self.z:.3f} - az: {self.az:.3f}',
@@ -732,17 +906,17 @@ class LoggingExample:
     def occupancy_map(self):
         measurements = np.array([self.front, self.left, self.back, self.right]) / 1000  # meters
         for j in range(4):  # 4 sensors
-            yaw_sensor = self.yaw + j * np.pi / 2  # yaw positive is counterclockwise
+            yaw_sensor = np.deg2rad(self.yaw) + j * np.pi / 2  # yaw positive is counterclockwise
             measurement = measurements[j]
             for i in range(int(range_max / res_pos)):  # range is 2 meters
                 dist = i * res_pos
-                idx_x = int(np.round((self.x - min_x + dist * np.cos(yaw_sensor)) / res_pos, 0))
-                idx_y = int(np.round((self.y - min_y + dist * np.sin(yaw_sensor)) / res_pos, 0))
+                idx_x = int(np.round((self.x + INITIAL_X - min_x + dist * np.cos(yaw_sensor)) / res_pos, 0))
+                idx_y = int(np.round((self.y + INITIAL_Y - min_y + dist * np.sin(yaw_sensor)) / res_pos, 0))
 
                 # make sure the current set point is within the self.occ_map
                 if idx_x < 0 or idx_x >= self.occ_map.shape[0] or idx_y < 0 or idx_y >= self.occ_map.shape[1] or dist > range_max:
                     break
-
+        
                 # update the self.occ_map
                 if dist < measurement:
                     self.occ_map[idx_x, idx_y] += conf
@@ -750,6 +924,15 @@ class LoggingExample:
                     self.occ_map[idx_x, idx_y] -= conf
                     break
         self.occ_map = np.clip(self.occ_map, -1, 1)  # certainty can never be more than 100%
+         # Find border indices
+        
+        rows, cols = self.occ_map.shape
+        border_indices_row = np.where((np.arange(rows) == 0) | (np.arange(rows) == rows - 1))
+        border_indices_col = np.where((np.arange(cols) == 0) | (np.arange(cols) == cols - 1))
+
+        # Set border elements to -1
+        self.occ_map[border_indices_row[0], :] = -1  # Set first and last rows to -1
+        self.occ_map[:, border_indices_col[0]] = -1  # Set first and last columns to -1
 
 
 if __name__ == '__main__':
@@ -780,6 +963,23 @@ if __name__ == '__main__':
 
         if enable_log_data:
             le.log_data()
+        if le.t %20 == 0:
+            plt.imshow(np.flip(le.occ_map, 1), vmin=-1, vmax=1, cmap='gray',
+                    origin='lower')  # flip the map to match the coordinate system
+            plt.scatter((max_y - (le.y +INITIAL_Y))/res_pos,(le.x + INITIAL_X)/res_pos , color='red')
+            if le.path is not None and (np.any(le.path)):
+            
+                x_values = [(max_y - (point[1]+INITIAL_Y))/res_pos for point in le.path]
+                y_values = [(point[0]+ INITIAL_X)/res_pos for point in le.path]
+                plt.scatter(x_values, y_values, color='blue')
+            
+            
+            x_values = [(max_y - (point[1]+INITIAL_Y))/res_pos for point in le.path_looking]
+            y_values = [(point[0]+ INITIAL_X)/res_pos for point in le.path_looking]
+            plt.scatter(x_values, y_values, color='yellow')
+
+            plt.savefig("occ_map.png")
+            plt.close()
 
     # Save the data
     if enable_log_data:
