@@ -430,7 +430,7 @@ class LoggingExample:
         yaw_goal = 20*yaw_goal
         yaw_goal = self.clip_angle(yaw_goal)
 
-        if self.path is None or self.t%20==0:
+        if self.path is None or self.t%15==0:
             
             start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,
                           int((self.y + INITIAL_Y)/res_pos + 0.5)]
@@ -595,7 +595,7 @@ class LoggingExample:
         yaw_goal = self.clip_angle(yaw_goal)
         
 
-        if self.t%20 == 0:
+        if self.t%15 == 0:
             start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
             end_node = [int((self.x +INITIAL_X + 2)/res_pos + 0.5),int((self.y +INITIAL_Y)/res_pos + 0.5)]
             path_test = a_star_search(np.array(self.occ_map), start_node, end_node,self)
@@ -764,7 +764,7 @@ class LoggingExample:
         
         
 
-        if self.path is None or self.t%20==0:
+        if self.path is None or self.t%15==0:
             
             start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
             end_node = [int((self.path_looking[self.path_looking_index,0] +INITIAL_X)/res_pos + 0.5),
