@@ -46,14 +46,14 @@ from rdp import rdp
 logging.basicConfig(level=logging.ERROR)
 
 # Initial Position
-INITIAL_X = 0.2
-INITIAL_Y = 1.7
+INITIAL_X = 0.4
+INITIAL_Y = 1.9
 LANDING_PAD_SIZE = 0.30
 
 # General Navigation
 DEFAULT_HEIGHT = 0.3  #m
 DEFAULT_VELOCITY = 0.4  #m/s
-GOAL_X = 2  # Landing zone
+GOAL_X = 3.5  # Landing zone
 RETURN_GOAL_X = 1.5  # Take off zone
 AZ_THRESHOLD = 0.08  #m/s^2  Detecting landing pad
 ORIGIN_THRESHOLD = 0.1  #m   Start spiraling
@@ -137,7 +137,7 @@ class LoggingExample:
         self.t = 0  # Iteration time
 
         self.occ_map = np.ones((int(5 / res_pos), int(3 / res_pos)))
-        self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.5), fixed_norm=0.01)
+        self.circle_points = normalize_spiral(circle(radius=LANDING_PAD_SIZE / 1.2), fixed_norm=0.01)
         self.path = None
         # Obstacle avoidance data
         self.default_direction = 'RIGHT'
@@ -359,7 +359,11 @@ class LoggingExample:
                 self.fsm = FSM.STOP
                 print('Critical ERROR: Take off failed')
             if self.z > DEFAULT_HEIGHT - 0.05:
-                self.fsm = FSM.GOING_BACK if self.landing_pad_reached else FSM.CROSS
+                if self.landing_pad_reached:
+                    self.fsm = FSM.GOING_BACK
+                    self.path = None
+                else: 
+                    self.fsm = FSM.CROSS
                 self.take_off_iter = 0
 
         elif self.fsm == FSM.CROSS:
@@ -405,21 +409,7 @@ class LoggingExample:
         elif self.fsm == FSM.LANDING:
             self.fsm = FSM.STOP if self.landing_pad_reached else FSM.TAKE_OFF
             self.landing_pad_reached = True
-
-            start_node = [int(np.round((self.x +INITIAL_X)/res_pos,0)),int((self.y + INITIAL_Y)/res_pos)]
-            end_node = [int(np.round((INITIAL_X)/res_pos,0)),int((INITIAL_Y)/res_pos)]
-
-            if self.occ_map is not None:
-                self.path = a_star_search(np.array(self.occ_map), start_node, end_node,self)
-            if self.path is not None and (np.any(self.path)):
                 
-                #rdp algorithm to simplify the path
-                self.path = rdp(self.path,epsilon=1)
-                self.path = normalize_spiral(np.array(self.path),fixed_norm=0.01)
-                
-
-                
-            
         else:
             print("Invalid state")
 
@@ -436,14 +426,33 @@ class LoggingExample:
         return np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
     
     def going_back(self):
-        
-        dist = self.distance_2d(self.x,self.y,self.path[self.path_iter][0],self.path[self.path_iter][1])
+        yaw_goal = np.sin(self.t*np.pi/20)
+        yaw_goal = 20*yaw_goal
+        yaw_goal = self.clip_angle(yaw_goal)
 
-        if dist < 0.1 and self.path_iter <= len(self.path) - 2:
-            self.path_iter +=1
-       
-        self._cf.commander.send_position_setpoint(self.path[self.path_iter][0]*res_pos - INITIAL_X, self.path[self.path_iter][1]*res_pos-INITIAL_Y, DEFAULT_HEIGHT, 0)
-        time.sleep(0.05)
+        if self.path is None or self.t%20==0:
+            
+            start_node = [int((self.x +INITIAL_X )/res_pos +0.5) ,
+                          int((self.y + INITIAL_Y)/res_pos + 0.5)]
+            end_node = [int(( 0+ INITIAL_X)/res_pos + 0.5),
+                        int((0 +INITIAL_Y)/res_pos + 0.5)]
+
+            path_test = a_star_search(np.array(self.occ_map), start_node, end_node,self)
+            if path_test is not None:
+                self.path = np.array(path_test) * res_pos
+                self.path -= np.array([INITIAL_X, INITIAL_Y])
+            
+                self.path_iter_first = 0
+
+        if self.path is not None:
+            dist = self.distance_2d(self.x,self.y,self.path[self.path_iter_first][0],self.path[self.path_iter_first][1])
+            if (dist<0.06) and self.path_iter_first <= len(self.path)-2:
+                self.path_iter_first +=1
+            self._cf.commander.send_position_setpoint(self.path[self.path_iter_first][0] , self.path[self.path_iter_first][1], DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
+        else:
+            self._cf.commander.send_position_setpoint(self.x, self.y, DEFAULT_HEIGHT, yaw_goal)
+            time.sleep(0.05)
 
     def spiraling(self):
         x, y = self.spiral_coord[self.spiral_iter]
@@ -581,8 +590,8 @@ class LoggingExample:
 
         # Print the result
         
-        yaw_goal = np.sin(self.t*np.pi/15)
-        yaw_goal = 10*yaw_goal
+        yaw_goal = np.sin(self.t*np.pi/20)
+        yaw_goal = 20*yaw_goal
         yaw_goal = self.clip_angle(yaw_goal)
         
 
@@ -746,15 +755,14 @@ class LoggingExample:
         max_value = sensor_values[max_direction]
 
         yaw_goal = np.sin(self.t*np.pi/20)
-        yaw_goal = 10*yaw_goal
+        yaw_goal = 20*yaw_goal
         yaw_goal = self.clip_angle(yaw_goal)
         dist = self.distance_2d(self.x,self.y,self.path_looking[self.path_looking_index,0],self.path_looking[self.path_looking_index,1])
         print(self.path)
         if dist < 0.1:
             self.path_looking_index +=1
         
-        if self.path is None or self.t%30 == 0:
-            self.update_path_looking()
+        
 
         if self.path is None or self.t%20==0:
             
@@ -825,6 +833,7 @@ class LoggingExample:
             #while the number is not true
             while check and loop_number <= 10:
                 #check if we are close to an obstacles
+                path_point = self.path_looking[i] + np.array([INITIAL_X, INITIAL_Y])
                 check = self.is_closed_obstacle(path_point)
                 
                 #if we are close to an obstacle
@@ -834,7 +843,7 @@ class LoggingExample:
                     #dont get outside the map
                     if offset < 0.1: offset = 0.1
                     #update the path
-                    self.path_looking[i] = [path_point[0], path_point[1]] - np.array([INITIAL_X, INITIAL_Y])
+                    self.path_looking[i] = [path_point[0], offset] - np.array([INITIAL_X, INITIAL_Y])
                     
                 elif check:
                     #new coordinate
@@ -842,7 +851,7 @@ class LoggingExample:
                     #dont get outside the map
                     if offset > 2.9: offset = 2.9
                     #update the path
-                    self.path_looking[i] = [path_point[0], path_point[1]] - np.array([INITIAL_X, INITIAL_Y])
+                    self.path_looking[i] = [path_point[0], offset] - np.array([INITIAL_X, INITIAL_Y])
                     
                 loop_number += 1
         return
@@ -850,30 +859,30 @@ class LoggingExample:
 #check if we are too close to an obstacle     
     def is_closed_obstacle(self,path_point):
         #update the distance to check so that we dont go away from the side
-        if path_point[0] > 4.7:
+        if path_point[0] > 4.7 - INITIAL_X:
             dist_x_top = 0
         else:
             dist_x_top = 2
 
-        if path_point[1] <= 0.2:
+        if path_point[1] <= 0.2 - INITIAL_Y:
             dist_y_right = 0
         else: 
             dist_y_right = 3
 
-        if path_point[1] >2.7:
+        if path_point[1] >2.7 - INITIAL_Y:
             dist_y_left = 0
         else:
             dist_y_left = 3
         dist_x_bottom = 2
         
         #convert to map reference frame
-        [int(( +INITIAL_X )/res_pos +0.5) ,int((self.y + INITIAL_Y)/res_pos + 0.5)]
+        
         x_on_map = int((path_point[0]+INITIAL_X )/res_pos +0.5)
         y_on_map = int((path_point[1]+INITIAL_Y )/res_pos +0.5)
 
         #check the surronding
         matches1 = np.where(self.occ_map[x_on_map - dist_x_bottom : x_on_map + dist_x_top, 
-                                y_on_map - dist_y_right: y_on_map + dist_y_left] <-0.3)
+                                y_on_map - dist_y_right: y_on_map + dist_y_left] < 0.9)
         if len(matches1[0]) >0 :
             #no clean surrounding
             return True
