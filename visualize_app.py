@@ -47,7 +47,6 @@ def build_app():
         data['fsm_change'] = data['fsm'].ne(data['fsm'].shift()).astype(int) * scaling
 
         # Select data columns
-        st.text(f'Select data columns to plot: {data.columns}')
         columns = st.multiselect(label='Select data columns:', options=list(data.columns), default=['x', 'y', 'z'])
         data = data[columns]
 

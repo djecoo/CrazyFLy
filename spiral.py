@@ -92,11 +92,35 @@ def plot_spiral(a, b, theta_max=10 * np.pi, num_points=1000):
     plt.grid(True)
     plt.show()
 
+def plus_pattern(edge_length: float = 0.30):
+    # Generate the points for the plus pattern
+    points = np.array([[0, 0], [0, edge_length], [0, 0], [edge_length, 0], [0, 0], [0, -edge_length], [0, 0], [-edge_length, 0], [0, 0]])
+    return points
+
+def squished_spiral(hateur=0.3, inter_space=0.15):
+    points = [[0, 0]]
+    for j in range(0, 10, 2):
+        i = j * inter_space
+        k = (j+1) * inter_space
+        points.append([hateur, i])
+        points.append([0, i])
+        points.append([-hateur, i])
+        points.append([-hateur, -k])
+        points.append([0, -k])
+        points.append([hateur, -k])
+    return np.array(points)
+        
+    
+
 
 if __name__ == '__main__':
     # Try different values for a and b
-    a = 0
-    b = 0.035
-    plot_spiral(a, b)
+    points = squished_spiral()
+    points = np.array(points)
 
-    print(star())
+    # plot
+    plt.figure(figsize=(8, 8))
+    plt.plot(points[:, 0], points[:, 1], marker='x')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.show()

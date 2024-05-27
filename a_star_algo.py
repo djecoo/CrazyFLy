@@ -155,7 +155,7 @@ def check_neighbour(point):
     #total cost
     count = np.sum(small_grid < 0.6)
     
-    return 1* count
+    return 5* count
 
 #heuristic cost
 def heuristic(node, end_node):
